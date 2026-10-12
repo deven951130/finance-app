@@ -10,6 +10,7 @@ Streamlit 的運作方式和一般程式不太一樣：
 
 from datetime import date
 
+import pandas as pd  # 安裝 streamlit 時會一起裝好，用來顯示表格
 import streamlit as st
 
 import db
@@ -19,6 +20,9 @@ from models.budget import (
     remaining_this_month,
     spent_by_category,
 )
+from models.cashflow import monthly_savings, total_debt_payment
+from models.debt import payment_this_period, payoff_month
+from models.stocks import CONCENTRATION_LIMIT, analyze, over_concentrated
 
 # 頁面基本設定（必須是第一個 st. 指令）
 st.set_page_config(page_title="個人理財", page_icon="💰")
@@ -30,6 +34,64 @@ db.init_db()
 def money(x: float) -> str:
     """把數字格式化成金額字串，例如 12345 -> '$12,345'。"""
     return f"${x:,.0f}"
+
+
+def profit_color(x: float) -> str:
+    """台股習慣：賺錢紅色、賠錢綠色。回傳 CSS 顏色字串。"""
+    if x > 0:
+        return "color: red"
+    if x < 0:
+        return "color: green"
+    return ""
+
+
+def colored_money(x: float) -> str:
+    """用 Streamlit 的 :red[...]、:green[...] 語法幫金額上色（台股習慣）。"""
+    if x > 0:
+        return f":red[+{money(x)}]"
+    if x < 0:
+        return f":green[{money(x)}]"
+    return money(x)
+
+
+# ---------- 頁面：總覽 ----------
+
+def page_overview() -> None:
+    st.header("總覽")
+
+    # --- 每月現金流 ---
+    settings = db.get_settings()
+    income = settings["monthly_income"]
+    fixed_total = sum(item["amount"] for item in db.get_fixed_expenses())
+    debt_payment = total_debt_payment(db.get_debts())
+    living = sum(db.get_budgets().values())
+    savings = monthly_savings(income, fixed_total, debt_payment, living)
+
+    st.subheader("每月現金流")
+    # 用表格把算式一項一項列出來，比較好對帳
+    st.table(pd.DataFrame({
+        "項目": ["收入", "− 固定支出", "− 負債還款", "− 生活預算", "= 每月可存"],
+        "金額": [money(income), money(fixed_total), money(debt_payment),
+                 money(living), money(savings)],
+    }).set_index("項目"))
+    if savings < 0:
+        st.error(f"每月入不敷出 {money(-savings)}")
+
+    # --- 持股集中度警告 ---
+    analyzed = analyze(db.get_holdings())
+    for m in over_concentrated(analyzed):
+        st.warning(
+            f"⚠️ {m['name']}（{m['symbol']}）占總市值 {m['weight']:.1%}，"
+            f"超過 {CONCENTRATION_LIMIT:.0%}，風險過度集中"
+        )
+
+    # --- 簡單資產概況 ---
+    total_value = sum(m["value"] for m in analyzed)
+    total_debt = sum(d["remaining"] for d in db.get_debts())
+    col1, col2, col3 = st.columns(3)
+    col1.metric("手上現金", money(settings["cash_on_hand"]))
+    col2.metric("股票市值", money(total_value))
+    col3.metric("負債餘額", money(total_debt))
 
 
 # ---------- 頁面：記帳 ----------
@@ -151,6 +213,145 @@ def page_fixed() -> None:
     st.write(f"固定支出合計：**{money(total)}** / 月")
 
 
+# ---------- 頁面：負債 ----------
+
+def page_debts() -> None:
+    st.header("負債追蹤")
+
+    with st.form("add_debt", clear_on_submit=True):
+        name = st.text_input("名稱（例如 學貸、信用卡分期）")
+        remaining = st.number_input("剩餘金額", min_value=0.0, step=1000.0)
+        monthly = st.number_input("每月還款", min_value=0.0, step=100.0)
+        if st.form_submit_button("新增"):
+            if not name.strip():
+                st.error("請輸入名稱")
+            elif remaining <= 0 or monthly <= 0:
+                st.error("剩餘金額和每月還款都要大於 0")
+            else:
+                db.add_debt(name.strip(), remaining, monthly)
+                st.success(f"已新增：{name}")
+
+    st.write(f"手上現金：**{money(db.get_settings()['cash_on_hand'])}**")
+
+    debts = db.get_debts()
+    if not debts:
+        st.info("沒有負債 🎉")
+        return
+
+    today = date.today()
+    for d in debts:
+        # st.container(border=True)：畫一個有框線的區塊，讓每筆負債分開
+        with st.container(border=True):
+            st.write(f"**{d['name']}**")
+            col1, col2, col3 = st.columns(3)
+            col1.write(f"剩餘 {money(d['remaining'])}")
+            col2.write(f"每月 {money(d['monthly_payment'])}")
+            ym = payoff_month(d["remaining"], d["monthly_payment"], today)
+            col3.write("已還清 ✅" if ym is None else f"預計 {ym[0]} 年 {ym[1]} 月還清")
+
+            b1, b2 = st.columns(2)
+            if ym is not None:
+                pay = payment_this_period(d["remaining"], d["monthly_payment"])
+                if b1.button(f"已還一期（{money(pay)}）", key=f"pay_{d['id']}"):
+                    try:
+                        db.pay_debt_installment(d["id"])
+                        st.rerun()
+                    except ValueError as e:  # 現金不夠時，db 會丟出 ValueError
+                        st.error(str(e))
+            if b2.button("刪除", key=f"del_debt_{d['id']}"):
+                db.delete_debt(d["id"])
+                st.rerun()
+
+
+# ---------- 頁面：持股 ----------
+
+def page_stocks() -> None:
+    st.header("持股管理")
+
+    with st.form("add_holding", clear_on_submit=True):
+        col1, col2, col3 = st.columns(3)
+        name = col1.text_input("名稱（例如 台積電）")
+        symbol = col2.text_input("代號（例如 2330）")
+        account = col3.text_input("帳戶（例如 富邦）")
+        col4, col5, col6 = st.columns(3)
+        shares = col4.number_input("股數", min_value=0.0, step=1.0)
+        avg_price = col5.number_input("均價", min_value=0.0, step=0.1)
+        price = col6.number_input("現價", min_value=0.0, step=0.1)
+        if st.form_submit_button("新增"):
+            if not (name.strip() and symbol.strip() and account.strip()):
+                st.error("名稱、代號、帳戶都要填")
+            elif shares <= 0 or avg_price <= 0 or price <= 0:
+                st.error("股數、均價、現價都要大於 0")
+            else:
+                db.add_holding(name.strip(), symbol.strip(), account.strip(),
+                               shares, avg_price, price)
+                st.success(f"已新增：{name} {account}")
+
+    holdings = db.get_holdings()
+    if not holdings:
+        st.info("還沒有持股")
+        return
+
+    # --- 合併後的計算結果 ---
+    analyzed = analyze(holdings)
+    total_value = sum(m["value"] for m in analyzed)
+    total_profit = sum(m["profit"] for m in analyzed)
+    st.subheader("持股總覽（同代號已合併）")
+    st.markdown(f"總市值 **{money(total_value)}**　總損益 **{colored_money(total_profit)}**")
+
+    table = pd.DataFrame([{
+        "名稱": m["name"],
+        "代號": m["symbol"],
+        "帳戶": "、".join(m["accounts"]),
+        "股數": m["shares"],
+        "均價": m["avg_price"],
+        "現價": m["price"],
+        "市值": m["value"],
+        "損益": m["profit"],
+        "報酬率%": m["profit_pct"],
+        "占比%": m["weight"] * 100,
+        "回本價": m["breakeven"],          # 沒虧損時是 None，表格顯示空白
+        "還要漲%": m["rise_needed"],
+    } for m in analyzed])
+
+    # Styler：幫表格上色、設定數字格式
+    styled = (
+        table.style
+        .map(profit_color, subset=["損益", "報酬率%"])
+        .format({
+            "股數": "{:,.0f}", "均價": "{:,.2f}", "現價": "{:,.2f}",
+            "市值": "{:,.0f}", "損益": "{:+,.0f}", "報酬率%": "{:+.2f}",
+            "占比%": "{:.1f}", "回本價": "{:,.2f}", "還要漲%": "{:.2f}",
+        }, na_rep="")
+    )
+    st.dataframe(styled, hide_index=True)
+
+    # --- 更新現價 ---
+    st.subheader("更新現價")
+    with st.form("update_price"):
+        symbols = [m["symbol"] for m in analyzed]
+        sym = st.selectbox("代號", symbols,
+                           format_func=lambda s: f"{s} {next(m['name'] for m in analyzed if m['symbol'] == s)}")
+        new_price = st.number_input("新的現價", min_value=0.0, step=0.1)
+        if st.form_submit_button("更新"):
+            if new_price <= 0:
+                st.error("現價要大於 0")
+            else:
+                db.update_price(sym, new_price)
+                st.rerun()
+
+    # --- 各帳戶明細（可刪除）---
+    st.subheader("各帳戶明細")
+    for h in holdings:
+        col1, col2, col3, col4 = st.columns([3, 2, 3, 1])
+        col1.write(f"{h['name']}（{h['symbol']}）")
+        col2.write(h["account"])
+        col3.write(f"{h['shares']:,.0f} 股 @ {h['avg_price']:,.2f}")
+        if col4.button("刪除", key=f"del_hold_{h['id']}"):
+            db.delete_holding(h["id"])
+            st.rerun()
+
+
 # ---------- 頁面：設定 ----------
 
 def page_settings() -> None:
@@ -185,9 +386,12 @@ def page_settings() -> None:
 
 # 用 dict 把「頁面名稱」對應到「要呼叫的函式」
 PAGES = {
+    "總覽": page_overview,
     "記帳": page_expenses,
     "每月預算": page_budgets,
     "固定支出": page_fixed,
+    "負債": page_debts,
+    "持股": page_stocks,
     "設定": page_settings,
 }
 

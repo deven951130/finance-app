@@ -12,6 +12,7 @@ import os
 import sqlite3
 
 from models.budget import CATEGORIES
+from models.debt import payment_this_period
 
 # 資料庫檔案位置。可以用環境變數 FINANCE_DB 改成別的路徑（例如測試時）。
 DB_PATH = os.environ.get("FINANCE_DB", os.path.join("data", "finance.db"))
@@ -66,6 +67,26 @@ def init_db() -> None:
             " id INTEGER PRIMARY KEY AUTOINCREMENT,"
             " name TEXT NOT NULL,"
             " amount REAL NOT NULL)"
+        )
+
+        # 負債：剩餘金額、每月還款
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS debts ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " name TEXT NOT NULL,"
+            " remaining REAL NOT NULL,"
+            " monthly_payment REAL NOT NULL)"
+        )
+        # 持股：同一代號可以在不同帳戶各有一列，計算時再合併
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS holdings ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " name TEXT NOT NULL,"
+            " symbol TEXT NOT NULL,"
+            " account TEXT NOT NULL,"
+            " shares REAL NOT NULL,"
+            " avg_price REAL NOT NULL,"
+            " price REAL NOT NULL)"   # 現價，手動輸入
         )
 
         # INSERT OR IGNORE：如果這個 key 已經有值就不覆蓋，只補上缺少的
@@ -175,3 +196,95 @@ def delete_fixed_expense(fixed_id: int) -> None:
     """刪除一項固定支出。"""
     with get_connection() as conn:
         conn.execute("DELETE FROM fixed_expenses WHERE id = ?", (fixed_id,))
+
+
+# ---------- 負債 ----------
+
+def get_debts() -> list[dict]:
+    """讀取所有負債。"""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, name, remaining, monthly_payment FROM debts ORDER BY id"
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def add_debt(name: str, remaining: float, monthly_payment: float) -> None:
+    """新增一筆負債。"""
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO debts (name, remaining, monthly_payment) VALUES (?, ?, ?)",
+            (name, remaining, monthly_payment),
+        )
+
+
+def delete_debt(debt_id: int) -> None:
+    """刪除一筆負債。"""
+    with get_connection() as conn:
+        conn.execute("DELETE FROM debts WHERE id = ?", (debt_id,))
+
+
+def pay_debt_installment(debt_id: int) -> float:
+    """「已還一期」：剩餘金額和手上現金同時扣掉這一期的還款，回傳扣了多少。
+
+    兩個數字放在同一個 with 區塊裡更新，這叫「交易（transaction）」：
+    要嘛兩個都改成功，要嘛中途出錯兩個都不改，不會只扣了一邊。
+    現金不夠時會丟出 ValueError，什麼都不改。
+    """
+    with get_connection() as conn:
+        debt = conn.execute(
+            "SELECT remaining, monthly_payment FROM debts WHERE id = ?", (debt_id,)
+        ).fetchone()
+        cash = conn.execute(
+            "SELECT value FROM settings WHERE key = 'cash_on_hand'"
+        ).fetchone()["value"]
+
+        pay = payment_this_period(debt["remaining"], debt["monthly_payment"])
+        if pay <= 0:
+            raise ValueError("這筆負債已經還清了")
+        if pay > cash:
+            raise ValueError(f"手上現金 {cash:,.0f} 不夠還這一期 {pay:,.0f}")
+
+        conn.execute(
+            "UPDATE debts SET remaining = remaining - ? WHERE id = ?", (pay, debt_id)
+        )
+        conn.execute(
+            "UPDATE settings SET value = value - ? WHERE key = 'cash_on_hand'", (pay,)
+        )
+    return pay
+
+
+# ---------- 持股 ----------
+
+def get_holdings() -> list[dict]:
+    """讀取所有持股（每個帳戶一列，還沒合併）。"""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, name, symbol, account, shares, avg_price, price"
+            " FROM holdings ORDER BY symbol, account"
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def add_holding(name: str, symbol: str, account: str, shares: float,
+                avg_price: float, price: float) -> None:
+    """新增一筆持股。同代號的其他帳戶現價也一起更新，確保合併計算時一致。"""
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO holdings (name, symbol, account, shares, avg_price, price)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (name, symbol, account, shares, avg_price, price),
+        )
+        conn.execute("UPDATE holdings SET price = ? WHERE symbol = ?", (price, symbol))
+
+
+def update_price(symbol: str, price: float) -> None:
+    """更新某個代號的現價（所有帳戶一起改）。"""
+    with get_connection() as conn:
+        conn.execute("UPDATE holdings SET price = ? WHERE symbol = ?", (price, symbol))
+
+
+def delete_holding(holding_id: int) -> None:
+    """刪除一筆持股。"""
+    with get_connection() as conn:
+        conn.execute("DELETE FROM holdings WHERE id = ?", (holding_id,))
