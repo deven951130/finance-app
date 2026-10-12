@@ -156,6 +156,7 @@ finance-app/
 │   ├── precheck.py     # 下單前檢查
 │   ├── trades.py       # 交易紀錄統計（當沖次數）
 │   └── dca.py          # 定期定額試算、4% 法則
+├── .streamlit/config.toml  # 外觀主題：配色、字型、圓角
 ├── tests/              # pytest 測試
 ├── docs/screenshots/   # README 截圖（虛構資料）
 ├── data/               # 資料庫檔案（不會進 git）

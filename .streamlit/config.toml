@@ -1,0 +1,40 @@
+# Streamlit 外觀設定（用 streamlit run app.py 啟動時會自動讀取）
+#
+# 配色原則：
+# - 主色用墨藍色，紅色和綠色只留給「漲跌」（台股習慣：紅漲綠跌）
+# - 背景用偏暖的米白色，像紙本帳本，比純白不刺眼
+#
+# 注意：打包成 exe 時不會讀到這個檔案，要在 run_app.py 加上對應的 --theme.* 參數
+
+[client]
+# 隱藏右上角的 Deploy 等開發者按鈕
+toolbarMode = "minimal"
+
+[theme]
+base = "light"
+primaryColor = "#2B4C7E"              # 墨藍：按鈕、勾選框、連結
+backgroundColor = "#F6F4EF"           # 米白：頁面背景
+secondaryBackgroundColor = "#ECE8DF"  # 輸入框底色
+textColor = "#1F2633"
+borderColor = "#E2DDD2"
+showWidgetBorder = true
+baseRadius = "10px"
+buttonRadius = "8px"
+# 中文字型：有網路時用 Google 的思源黑體，沒網路就用系統內建的微軟正黑體 / 蘋方
+font = "Noto Sans TC:https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap, Microsoft JhengHei, PingFang TC, sans-serif"
+headingFontWeights = [700, 700, 600, 600, 600, 600]
+metricValueFontWeight = 600
+metricValueFontSize = "1.65rem"
+# Streamlit 內建的紅、綠色（:red[...]、st.error 等）調成和圖表一致的顏色
+redColor = "#D64545"
+greenColor = "#1E9E6A"
+dataframeHeaderBackgroundColor = "#F1EEE7"
+chartCategoricalColors = ["#2B4C7E", "#C9973F", "#6C8EBF", "#8A6FB0", "#4F9A94", "#B7B1A5"]
+
+# 側邊欄：深墨藍底、淺色字
+[theme.sidebar]
+backgroundColor = "#1E2B45"
+secondaryBackgroundColor = "#2A3A5A"
+textColor = "#E8ECF4"
+primaryColor = "#E3B866"
+borderColor = "#2F4064"
