@@ -44,3 +44,7 @@ Thumbs.db
 
 # 匯出的備份壓縮檔
 *.zip
+
+# PyInstaller 打包產生的檔案
+build/
+dist/

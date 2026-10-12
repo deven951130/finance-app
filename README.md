@@ -101,6 +101,31 @@ FINANCE_DB=data/example.db streamlit run app.py
 pytest
 ```
 
+## 打包成獨立程式（exe）
+
+不想每次開終端機，可以打包成點兩下就能用的程式，使用的電腦**不需要安裝 Python**。
+
+> 打包只能在「目標系統」上做：Windows 的 exe 要在 Windows 上打包，Mac 版要在 Mac 上打包。
+
+**Windows**：在 finance-app 資料夾裡點兩下 `build_exe.bat`。完成後程式在 `dist\FinanceApp\FinanceApp.exe`。
+
+**macOS**：在終端機執行 `bash build_mac.sh`。完成後程式在 `dist/FinanceApp/FinanceApp`。
+
+使用方式：
+- 點兩下 `FinanceApp.exe`，會出現一個黑色視窗，瀏覽器自動打開程式。**關掉黑色視窗就結束程式。**
+- 整個 `dist/FinanceApp` 資料夾要一起搬（大約 300 MB），不能只複製 exe。可以對 exe 按右鍵建立桌面捷徑。
+- exe 版的資料存在 `家目錄/FinanceApp/finance.db`（例如 `C:\Users\你的名字\FinanceApp\finance.db`），更新程式不會遺失資料。實際位置顯示在「設定」頁最下面。
+- 第一次執行時，Windows 可能會跳出「Windows 已保護您的電腦」。這是因為程式沒有付費的數位簽章，按「其他資訊 → 仍要執行」即可；Mac 則是按右鍵選「打開」。
+
+相關檔案：
+
+| 檔案 | 用途 |
+|---|---|
+| `run_app.py` | exe 的啟動入口，代替我們輸入 `streamlit run app.py` |
+| `FinanceApp.spec` | PyInstaller 打包設定：要打包哪些檔案 |
+| `build_exe.bat` / `build_mac.sh` | 一鍵打包腳本 |
+| `requirements-build.txt` | 打包才需要的套件（PyInstaller） |
+
 ## 技術架構
 
 | 層 | 檔案 | 負責 |
@@ -115,6 +140,10 @@ finance-app/
 ├── app.py              # Streamlit 主程式
 ├── db.py               # 資料庫讀寫、CSV 匯出
 ├── seed_example.py     # 產生虛構範例資料
+├── run_app.py          # exe 啟動入口
+├── FinanceApp.spec     # PyInstaller 打包設定
+├── build_exe.bat       # Windows 打包腳本
+├── build_mac.sh        # macOS 打包腳本
 ├── models/
 │   ├── budget.py       # 本月還能花多少
 │   ├── cashflow.py     # 每月現金流
@@ -131,13 +160,15 @@ finance-app/
 ```
 
 資料表：`settings`、`budgets`、`expenses`、`fixed_expenses`、`debts`、`holdings`、`trades`。
-資料庫路徑預設是 `data/finance.db`，可以用環境變數 `FINANCE_DB` 改成別的檔案。
+資料庫路徑預設是專案裡的 `data/finance.db`（exe 版是 `家目錄/FinanceApp/finance.db`），可以用環境變數 `FINANCE_DB` 改成別的檔案。
 
 ## 隱私
 
 - `data/`、`*.db`、`.env`、`*.csv`、`*.xlsx`、`*.zip` 都列在 `.gitignore`，不會被 commit。
 - 匯出的備份檔是你的真實資料，請存在專案資料夾以外的地方。
 - 上傳 GitHub 前可以用 `git status` 確認沒有資料庫或備份檔。
+- 打包產生的 `build/`、`dist/` 也已排除，不會被 commit。
+- exe 只在自己的電腦上執行（只接受 localhost 連線），區網裡的其他人連不到。
 
 ## 免責聲明
 

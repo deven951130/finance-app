@@ -15,7 +15,8 @@
 import os
 from datetime import date, timedelta
 
-EXAMPLE_DB = os.path.join("data", "example.db")
+# 用 __file__ 算出絕對路徑，不管從哪個資料夾執行都寫到專案的 data/
+EXAMPLE_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "example.db")
 
 # 一定要在 import db 之前設定環境變數，db.py 才會讀到範例資料庫的路徑
 os.environ["FINANCE_DB"] = EXAMPLE_DB

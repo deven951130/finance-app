@@ -8,6 +8,7 @@ Streamlit 的運作方式和一般程式不太一樣：
 所以資料都要存在資料庫裡，每次重跑時再讀出來。
 """
 
+import os
 from datetime import date
 
 import pandas as pd  # 安裝 streamlit 時會一起裝好，用來顯示表格
@@ -507,6 +508,7 @@ def page_settings() -> None:
         mime="application/zip",
     )
     st.caption("備份檔裡是你的真實資料，請不要放進專案資料夾或上傳到 GitHub。")
+    st.caption(f"資料庫檔案位置：{os.path.abspath(db.DB_PATH)}")
 
 
 # ---------- 側邊欄：選擇頁面 ----------

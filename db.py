@@ -4,21 +4,40 @@
 所有「讀寫資料庫」的程式都集中在這個檔案，app.py 只呼叫這裡的函式，
 不直接寫 SQL。這樣以後要改資料表時，只需要改這一個地方。
 
-資料庫檔案預設放在 data/finance.db，這個資料夾已經被 .gitignore 排除，
-所以你的真實財務資料不會被 commit。
+資料庫檔案放在哪裡：
+- 用 python / streamlit 執行時：專案裡的 data/finance.db（已被 .gitignore 排除）
+- 打包成 exe 執行時：使用者家目錄的 FinanceApp/finance.db
+  （例如 C:\\Users\\你的名字\\FinanceApp\\finance.db）
 """
 
 import csv
 import io
 import os
 import sqlite3
+import sys
 import zipfile
 
 from models.budget import CATEGORIES
 from models.debt import payment_this_period
 
-# 資料庫檔案位置。可以用環境變數 FINANCE_DB 改成別的路徑（例如測試時）。
-DB_PATH = os.environ.get("FINANCE_DB", os.path.join("data", "finance.db"))
+
+
+def default_db_path() -> str:
+    """決定資料庫的預設位置。"""
+    # PyInstaller 打包的 exe 執行時，sys.frozen 會是 True。
+    # exe 的程式檔每次啟動會解壓到暫存資料夾，關掉就刪除，資料不能放在那裡，
+    # 所以改放到使用者的家目錄，更新或重新安裝 exe 也不會遺失資料。
+    if getattr(sys, "frozen", False):
+        return os.path.join(os.path.expanduser("~"), "FinanceApp", "finance.db")
+
+    # 一般執行：放在 db.py 所在資料夾底下的 data/。
+    # 用 __file__ 算出絕對路徑，不管從哪個資料夾啟動，都會找到同一個檔案。
+    here = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(here, "data", "finance.db")
+
+
+# 資料庫檔案位置。可以用環境變數 FINANCE_DB 改成別的路徑（例如測試或範例資料）。
+DB_PATH = os.environ.get("FINANCE_DB", default_db_path())
 
 # 設定頁的預設值：預備金目標預設 17000，其他預設 0
 DEFAULT_SETTINGS = {
