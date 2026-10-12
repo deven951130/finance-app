@@ -27,8 +27,14 @@ python -m pip install -r requirements-build.txt || goto :error
 echo [3/3] Building the exe, this takes a few minutes...
 pyinstaller --noconfirm FinanceApp.spec || goto :error
 
+REM build\ only holds temporary files. Its FinanceApp.exe does NOT work,
+REM so delete it to avoid opening the wrong exe by mistake.
+rmdir /s /q build
+
 echo.
 echo Done! The program is at dist\FinanceApp\FinanceApp.exe
+echo Opening that folder for you now...
+explorer "dist\FinanceApp"
 pause
 exit /b 0
 

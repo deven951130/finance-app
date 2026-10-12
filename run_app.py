@@ -10,8 +10,7 @@ exe 的啟動入口。
 
 import os
 import sys
-
-from streamlit.web import cli as stcli
+import traceback
 
 
 def resource_path(relative: str) -> str:
@@ -25,6 +24,9 @@ def resource_path(relative: str) -> str:
 
 
 def main() -> None:
+    # 放在函式裡才 import：如果連 Streamlit 都載入失敗，也能被下面的 try 抓到並顯示原因
+    from streamlit.web import cli as stcli
+
     sys.argv = [
         "streamlit",
         "run",
@@ -41,5 +43,36 @@ def main() -> None:
     sys.exit(stcli.main())
 
 
+def show_error_and_wait(message: str) -> None:
+    """程式出錯時，把錯誤印出來並存成檔案，然後停住，不讓黑色視窗直接關掉。"""
+    log_dir = os.path.join(os.path.expanduser("~"), "FinanceApp")
+    log_path = os.path.join(log_dir, "error.log")
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write(message)
+    except OSError:
+        log_path = "(could not write log file)"
+
+    # 用英文，避免 Windows 黑色視窗的編碼問題
+    print()
+    print("=" * 60)
+    print("FinanceApp crashed. Error details:")
+    print("=" * 60)
+    print(message)
+    print(f"This error was also saved to: {log_path}")
+    input("Press Enter to close this window...")
+
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit as e:
+        # 正常結束是 0（或 None）；其他代碼代表 Streamlit 啟動失敗
+        if e.code not in (0, None):
+            show_error_and_wait(f"Streamlit exited with code {e.code}")
+        raise
+    except Exception:
+        # 任何其他錯誤（按 Ctrl+C 結束不算錯誤，所以不用 BaseException）：顯示完整的錯誤訊息（traceback）
+        show_error_and_wait(traceback.format_exc())
+        raise

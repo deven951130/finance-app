@@ -23,5 +23,8 @@ python -m pip install -r requirements-build.txt
 echo "[3/3] 打包中，大約需要 1 到 3 分鐘..."
 pyinstaller --noconfirm FinanceApp.spec
 
+# build/ 只是暫存檔，裡面的 FinanceApp 不能用，刪掉避免點錯
+rm -rf build
+
 echo
 echo "完成！程式在 dist/FinanceApp/FinanceApp ，在 Finder 裡點兩下就能啟動。"

@@ -117,6 +117,10 @@ pytest
 - exe 版的資料存在 `家目錄/FinanceApp/finance.db`（例如 `C:\Users\你的名字\FinanceApp\finance.db`），更新程式不會遺失資料。實際位置顯示在「設定」頁最下面。
 - 第一次執行時，Windows 可能會跳出「Windows 已保護您的電腦」。這是因為程式沒有付費的數位簽章，按「其他資訊 → 仍要執行」即可；Mac 則是按右鍵選「打開」。
 
+如果點開後視窗馬上關掉：
+- 確認點的是 `dist\FinanceApp\FinanceApp.exe`，**不是** `build` 資料夾裡的那個（那個是暫存檔，不能用）。
+- 程式出錯時，視窗會停住並顯示錯誤；錯誤也會存到 `家目錄/FinanceApp/error.log`。
+
 相關檔案：
 
 | 檔案 | 用途 |
