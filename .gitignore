@@ -41,3 +41,6 @@ env/
 .idea/
 .DS_Store
 Thumbs.db
+
+# 匯出的備份壓縮檔
+*.zip

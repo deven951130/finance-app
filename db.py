@@ -8,8 +8,11 @@
 所以你的真實財務資料不會被 commit。
 """
 
+import csv
+import io
 import os
 import sqlite3
+import zipfile
 
 from models.budget import CATEGORIES
 from models.debt import payment_this_period
@@ -87,6 +90,17 @@ def init_db() -> None:
             " shares REAL NOT NULL,"
             " avg_price REAL NOT NULL,"
             " price REAL NOT NULL)"   # 現價，手動輸入
+        )
+
+        # 交易紀錄：日期、標的、類型（買進／賣出／當沖）、損益、備註
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS trades ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " date TEXT NOT NULL,"
+            " symbol TEXT NOT NULL,"
+            " type TEXT NOT NULL,"
+            " pnl REAL NOT NULL DEFAULT 0,"
+            " note TEXT)"
         )
 
         # INSERT OR IGNORE：如果這個 key 已經有值就不覆蓋，只補上缺少的
@@ -288,3 +302,60 @@ def delete_holding(holding_id: int) -> None:
     """刪除一筆持股。"""
     with get_connection() as conn:
         conn.execute("DELETE FROM holdings WHERE id = ?", (holding_id,))
+
+
+# ---------- 交易紀錄 ----------
+
+def get_trades() -> list[dict]:
+    """讀取所有交易紀錄，新的在前面。"""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, date, symbol, type, pnl, note FROM trades"
+            " ORDER BY date DESC, id DESC"
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def add_trade(date_str: str, symbol: str, trade_type: str, pnl: float, note: str) -> None:
+    """新增一筆交易紀錄。"""
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO trades (date, symbol, type, pnl, note) VALUES (?, ?, ?, ?, ?)",
+            (date_str, symbol, trade_type, pnl, note),
+        )
+
+
+def delete_trade(trade_id: int) -> None:
+    """刪除一筆交易紀錄。"""
+    with get_connection() as conn:
+        conn.execute("DELETE FROM trades WHERE id = ?", (trade_id,))
+
+
+# ---------- 匯出 CSV 備份 ----------
+
+# 要備份的資料表
+EXPORT_TABLES = ["settings", "budgets", "expenses", "fixed_expenses",
+                 "debts", "holdings", "trades"]
+
+
+def export_csv_zip() -> bytes:
+    """把每張資料表各存成一個 CSV，打包成一個 zip，回傳 zip 檔的內容（bytes）。
+
+    整個過程都在記憶體裡完成（io.BytesIO 就像一個「假的檔案」），
+    不會在專案資料夾留下任何檔案，所以不用擔心備份檔被 commit。
+    """
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf, get_connection() as conn:
+        for table in EXPORT_TABLES:
+            # 表名不是使用者輸入的，是上面寫死的清單，所以可以放進 f-string
+            cursor = conn.execute(f"SELECT * FROM {table}")
+            headers = [col[0] for col in cursor.description]
+
+            text = io.StringIO()
+            writer = csv.writer(text)
+            writer.writerow(headers)
+            writer.writerows(cursor.fetchall())
+
+            # utf-8-sig：在檔案開頭加 BOM，Excel 打開中文才不會變亂碼
+            zf.writestr(f"{table}.csv", text.getvalue().encode("utf-8-sig"))
+    return buffer.getvalue()

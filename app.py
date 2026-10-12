@@ -22,18 +22,25 @@ from models.budget import (
 )
 from models.cashflow import monthly_savings, total_debt_payment
 from models.debt import payment_this_period, payoff_month
+from models.dca import monthly_withdrawal, project
+from models.precheck import CHECK_ITEMS, check_order
 from models.stocks import CONCENTRATION_LIMIT, analyze, over_concentrated
+from models.trades import TRADE_TYPES, count_day_trades, total_pnl
 
 # 頁面基本設定（必須是第一個 st. 指令）
-st.set_page_config(page_title="個人理財", page_icon="💰")
+st.set_page_config(page_title="個人理財", page_icon="💰", layout="wide")
 
 # 確保資料表存在
 db.init_db()
 
 
 def money(x: float) -> str:
-    """把數字格式化成金額字串，例如 12345 -> '$12,345'。"""
-    return f"${x:,.0f}"
+    """把數字格式化成金額字串，例如 12345 -> '12,345 元'。
+
+    注意：不要用 $ 符號！Streamlit 的 markdown 會把兩個 $ 中間的文字
+    當成數學公式（LaTeX），一行出現兩個金額就會整段變形。
+    """
+    return f"{x:,.0f} 元"
 
 
 def profit_color(x: float) -> str:
@@ -84,6 +91,14 @@ def page_overview() -> None:
             f"⚠️ {m['name']}（{m['symbol']}）占總市值 {m['weight']:.1%}，"
             f"超過 {CONCENTRATION_LIMIT:.0%}，風險過度集中"
         )
+
+    # --- 本月當沖次數 ---
+    today = date.today()
+    day_trades = count_day_trades(db.get_trades(), today.year, today.month)
+    if day_trades > 0:
+        st.error(f"🚨 本月已經當沖 {day_trades} 次，請停下來檢討")
+    else:
+        st.success("本月當沖 0 次 👍")
 
     # --- 簡單資產概況 ---
     total_value = sum(m["value"] for m in analyzed)
@@ -310,8 +325,9 @@ def page_stocks() -> None:
         "損益": m["profit"],
         "報酬率%": m["profit_pct"],
         "占比%": m["weight"] * 100,
-        "回本價": m["breakeven"],          # 沒虧損時是 None，表格顯示空白
-        "還要漲%": m["rise_needed"],
+        # 沒虧損時是 None，先轉成字串，空字串在表格裡就是空白
+        "回本價": "" if m["breakeven"] is None else f"{m['breakeven']:,.2f}",
+        "還要漲%": "" if m["rise_needed"] is None else f"{m['rise_needed']:.2f}",
     } for m in analyzed])
 
     # Styler：幫表格上色、設定數字格式
@@ -321,8 +337,8 @@ def page_stocks() -> None:
         .format({
             "股數": "{:,.0f}", "均價": "{:,.2f}", "現價": "{:,.2f}",
             "市值": "{:,.0f}", "損益": "{:+,.0f}", "報酬率%": "{:+.2f}",
-            "占比%": "{:.1f}", "回本價": "{:,.2f}", "還要漲%": "{:.2f}",
-        }, na_rep="")
+            "占比%": "{:.1f}",
+        })
     )
     st.dataframe(styled, hide_index=True)
 
@@ -350,6 +366,105 @@ def page_stocks() -> None:
         if col4.button("刪除", key=f"del_hold_{h['id']}"):
             db.delete_holding(h["id"])
             st.rerun()
+
+
+# ---------- 頁面：下單前檢查 ----------
+
+def page_precheck() -> None:
+    st.header("下單前檢查")
+    settings = db.get_settings()
+    cash = settings["cash_on_hand"]
+
+    col1, col2 = st.columns(2)
+    price = col1.number_input("股價", min_value=0.0, step=0.5)
+    shares = col2.number_input("股數", min_value=0, step=1000)  # 台股一張 = 1000 股
+    amount = price * shares
+    st.write(f"這筆要花：**{money(amount)}**　手上現金：**{money(cash)}**")
+
+    st.write("以下每一項都要誠實打勾：")
+    # 用 dict 推導式一次建立五個勾選框，key 讓 Streamlit 分得出每一個
+    checked = {item: st.checkbox(item, key=f"chk_{i}") for i, item in enumerate(CHECK_ITEMS)}
+
+    # 參考資訊：幫你確認打勾的內容是不是真的
+    fund, target = settings["emergency_fund"], settings["emergency_target"]
+    losing = [f"{m['name']}（{m['symbol']}）" for m in analyze(db.get_holdings()) if m["profit"] < 0]
+    st.caption(f"參考：緊急預備金 {money(fund)} / {money(target)}"
+               + ("（還沒存滿）" if fund < target else "（已存滿）"))
+    if losing:
+        st.caption("參考：目前虧損中的個股：" + "、".join(losing))
+
+    ok, reasons = check_order(amount, cash, checked)
+    if ok:
+        st.success("✅ 可以下單")
+    else:
+        # 用 markdown 的清單列出所有原因
+        st.error("⛔ 先不要下單\n\n" + "\n".join(f"- {r}" for r in reasons))
+
+
+# ---------- 頁面：交易紀錄 ----------
+
+def page_trades() -> None:
+    st.header("交易紀錄")
+
+    with st.form("add_trade", clear_on_submit=True):
+        col1, col2, col3 = st.columns(3)
+        trade_date = col1.date_input("日期", value=date.today())
+        symbol = col2.text_input("標的（例如 2330 台積電）")
+        trade_type = col3.selectbox("類型", TRADE_TYPES)
+        pnl = st.number_input("損益（賺填正數、賠填負數，買進填 0）", step=100.0)
+        note = st.text_input("備註（可不填）")
+        if st.form_submit_button("新增"):
+            if not symbol.strip():
+                st.error("請輸入標的")
+            else:
+                db.add_trade(trade_date.isoformat(), symbol.strip(), trade_type, pnl, note)
+                st.success("已新增交易紀錄")
+
+    trades = db.get_trades()
+    if not trades:
+        st.info("還沒有交易紀錄")
+        return
+
+    st.markdown(f"累計損益：**{colored_money(total_pnl(trades))}**")
+    for t in trades:
+        col1, col2, col3, col4, col5, col6 = st.columns([2, 2, 1, 2, 3, 1])
+        col1.write(t["date"])
+        col2.write(t["symbol"])
+        # 當沖用紅字標出來，提醒自己
+        col3.write(":red[當沖]" if t["type"] == "當沖" else t["type"])
+        col4.markdown(colored_money(t["pnl"]))
+        col5.write(t["note"] or "")
+        if col6.button("刪除", key=f"del_trade_{t['id']}"):
+            db.delete_trade(t["id"])
+            st.rerun()
+
+
+# ---------- 頁面：定期定額試算 ----------
+
+def page_dca() -> None:
+    st.header("定期定額試算")
+
+    col1, col2 = st.columns(2)
+    initial = col1.number_input("現有投資", min_value=0.0, step=10000.0, value=100000.0)
+    monthly = col2.number_input("每月投入", min_value=0.0, step=1000.0, value=5000.0)
+    rate_pct = col1.number_input("年報酬率（%）", min_value=-50.0, max_value=50.0,
+                                 step=0.5, value=6.0)
+    years = col2.number_input("年數", min_value=1, max_value=60, step=1, value=20)
+
+    values = project(initial, monthly, rate_pct / 100, int(years))
+    final = values[-1]
+    invested = initial + monthly * 12 * years  # 自己總共投入的本金
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("最後總額", money(final))
+    c2.metric("投入本金", money(invested))
+    c3.metric("4% 法則每月可領", money(monthly_withdrawal(final)))
+
+    # 折線圖：index 是年份，欄位是資產
+    chart = pd.DataFrame({"資產": values}, index=range(len(values)))
+    chart.index.name = "第幾年"
+    st.line_chart(chart)
+    st.caption("假設每月月底投入、年報酬率固定不變。實際報酬每年都會波動，這只是估算。")
 
 
 # ---------- 頁面：設定 ----------
@@ -381,6 +496,18 @@ def page_settings() -> None:
         st.write(f"緊急預備金進度：{money(fund)} / {money(target)}")
         st.progress(min(fund / target, 1.0))
 
+    # --- 匯出備份 ---
+    st.subheader("匯出 CSV 備份")
+    st.write("把所有資料表各存成一個 CSV，打包成 zip 下載。可以用 Excel 打開。")
+    # st.download_button：按下去瀏覽器就會下載檔案，檔案內容是 data 參數
+    st.download_button(
+        "下載備份",
+        data=db.export_csv_zip(),
+        file_name=f"finance-backup-{date.today().isoformat()}.zip",
+        mime="application/zip",
+    )
+    st.caption("備份檔裡是你的真實資料，請不要放進專案資料夾或上傳到 GitHub。")
+
 
 # ---------- 側邊欄：選擇頁面 ----------
 
@@ -392,6 +519,9 @@ PAGES = {
     "固定支出": page_fixed,
     "負債": page_debts,
     "持股": page_stocks,
+    "下單前檢查": page_precheck,
+    "交易紀錄": page_trades,
+    "定期定額試算": page_dca,
     "設定": page_settings,
 }
 
