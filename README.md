@@ -167,6 +167,10 @@ finance-app/
 資料表：`settings`、`budgets`、`expenses`、`fixed_expenses`、`debts`、`holdings`、`trades`。
 資料庫路徑預設是專案裡的 `data/finance.db`（exe 版是 `家目錄/FinanceApp/finance.db`），可以用環境變數 `FINANCE_DB` 改成別的檔案。
 
+## 給接手開發的人
+
+專案規則、慣例與目前進度在 [`CLAUDE.md`](CLAUDE.md)；各階段的設計決定與待辦清單在 [`docs/開發紀錄.md`](docs/開發紀錄.md)。
+
 ## 隱私
 
 - `data/`、`*.db`、`.env`、`*.csv`、`*.xlsx`、`*.zip` 都列在 `.gitignore`，不會被 commit。
