@@ -1,3 +1,4 @@
-# 打包成 exe 才需要的套件（平常開發不用裝）
+# Packages needed only for building the exe (not needed for normal development).
+# Keep this file ASCII-only: pip on Windows reads it with the system code page (cp950).
 -r requirements.txt
 pyinstaller>=6.10
