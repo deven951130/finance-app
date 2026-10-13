@@ -6,6 +6,19 @@
 
 > 所有截圖都是用 `seed_example.py` 產生的**虛構範例資料**。
 
+## 下載（Windows）
+
+不想安裝 Python 的話，可以直接下載打包好的 Windows 版（Windows 10 / 11，64 位元）：
+
+1. 到 [Releases](https://github.com/deven951130/finance-app/releases/latest) 下載 `FinanceApp-Windows-v1.0.0.zip`。
+2. 解壓縮到任何資料夾（例如桌面）。**整個資料夾要放在一起**，不能只複製 exe，也不要直接在 zip 裡面執行。
+3. 點兩下資料夾裡的 `FinanceApp.exe`，會出現一個黑色視窗，瀏覽器會自動打開程式。**關掉黑色視窗就結束程式。**
+4. 第一次執行如果跳出「Windows 已保護您的電腦」，按「其他資訊 → 仍要執行」。這是因為程式沒有付費的數位簽章；少數防毒軟體也可能誤判用 PyInstaller 打包的程式。
+
+- 資料存在 `C:\Users\你的名字\FinanceApp\finance.db`，只在你自己的電腦上。備份可以複製這個檔案，或在「設定」頁匯出 CSV。
+- 要更新時，下載新版、解壓縮後用新的資料夾取代舊的即可，資料不會遺失。
+- macOS 目前沒有提供下載檔，請參考下面的「打包成獨立程式」自己打包。
+
 ## 功能介紹
 
 ### 日常收支
@@ -60,7 +73,7 @@
 需要 Python 3.10 以上。
 
 ```bash
-git clone <這個 repo 的網址>
+git clone https://github.com/deven951130/finance-app.git
 cd finance-app
 
 # 建立虛擬環境（讓這個專案的套件跟系統分開）
@@ -113,7 +126,7 @@ pytest
 
 使用方式：
 - 點兩下 `FinanceApp.exe`，會出現一個黑色視窗，瀏覽器自動打開程式。**關掉黑色視窗就結束程式。**
-- 整個 `dist/FinanceApp` 資料夾要一起搬（大約 300 MB），不能只複製 exe。可以對 exe 按右鍵建立桌面捷徑。
+- 整個 `dist/FinanceApp` 資料夾要一起搬（大約 200 MB），不能只複製 exe。可以對 exe 按右鍵建立桌面捷徑。
 - exe 版的資料存在 `家目錄/FinanceApp/finance.db`（例如 `C:\Users\你的名字\FinanceApp\finance.db`），更新程式不會遺失資料。實際位置顯示在「設定」頁最下面。
 - 第一次執行時，Windows 可能會跳出「Windows 已保護您的電腦」。這是因為程式沒有付費的數位簽章，按「其他資訊 → 仍要執行」即可；Mac 則是按右鍵選「打開」。
 
@@ -179,6 +192,10 @@ finance-app/
 - 打包產生的 `build/`、`dist/` 也已排除，不會被 commit。
 - 不論是 exe 還是 `streamlit run app.py`，都只接受這台電腦自己連線（localhost），區網裡的其他人連不到；也不會傳送使用統計給 Streamlit。設定在 `.streamlit/config.toml` 和 `run_app.py`。
 - 畫面上的中文字型會從 Google Fonts 下載，只是字型檔，不會送出任何財務資料；沒有網路時會改用電腦內建的字型。
+
+## 授權
+
+[MIT License](LICENSE)：可以自由使用、修改、再發布，只要保留版權聲明。下載的 Windows 版裡另外附上 `THIRD_PARTY_LICENSES.txt`，列出打包進去的第三方套件（Streamlit、pandas 等）的授權。
 
 ## 免責聲明
 
