@@ -11,6 +11,8 @@
 - 每次 commit 前執行 `git status`，確認沒有上述檔案。新增檔案用 `git add <檔名>`，不要用 `git add -A` / `git add .`。
 - 截圖、範例、測試只能用**虛構資料**（`seed_example.py` 產生的 `data/example.db`，名稱像「範例學貸」「A 證券」）。不要把使用者貼給你的真實數字寫進程式碼、測試、文件或 commit 訊息。
 - 測試要用暫時的資料庫（`monkeypatch` 換掉 `db.DB_PATH`，見 `tests/test_trading_tools.py`），不能碰 `data/finance.db`。
+- **不要拿掉** `.streamlit/config.toml` 的 `server.address = "localhost"` 和 `browser.gatherUsageStats = false`：Streamlit 預設監聽所有網路介面（0.0.0.0），同一個 Wi-Fi 的人就能打開你的財務資料。exe 版的 `run_app.py` 也是同樣設定。
+- `FinanceApp.spec` 只打包 `models/*.py`，不要改回整個資料夾：`__pycache__` 裡的 .pyc 記錄了打包電腦上的絕對路徑（可能含使用者名稱）。
 
 ## 和使用者合作的方式
 

@@ -177,7 +177,8 @@ finance-app/
 - 匯出的備份檔是你的真實資料，請存在專案資料夾以外的地方。
 - 上傳 GitHub 前可以用 `git status` 確認沒有資料庫或備份檔。
 - 打包產生的 `build/`、`dist/` 也已排除，不會被 commit。
-- exe 只在自己的電腦上執行（只接受 localhost 連線），區網裡的其他人連不到。
+- 不論是 exe 還是 `streamlit run app.py`，都只接受這台電腦自己連線（localhost），區網裡的其他人連不到；也不會傳送使用統計給 Streamlit。設定在 `.streamlit/config.toml` 和 `run_app.py`。
+- 畫面上的中文字型會從 Google Fonts 下載，只是字型檔，不會送出任何財務資料；沒有網路時會改用電腦內建的字型。
 
 ## 免責聲明
 

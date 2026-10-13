@@ -7,6 +7,15 @@
 # 打包成 exe 時，FinanceApp.spec 會把這個檔案放到 exe 裡 app.py 旁邊的 .streamlit/，
 # Streamlit 會自動讀取「主程式旁邊的 .streamlit/config.toml」。改完要重新打包 exe 才會生效。
 
+[server]
+# 只接受這台電腦自己連線。不設定的話 Streamlit 預設監聽所有網路介面（0.0.0.0），
+# 同一個 Wi-Fi 的人輸入你的 IP 就能看到、修改你的財務資料。exe 版的 run_app.py 也是同樣設定
+address = "localhost"
+
+[browser]
+# 不傳送使用統計給 Streamlit（和 run_app.py 一樣）
+gatherUsageStats = false
+
 [client]
 # 隱藏右上角的 Deploy 等開發者按鈕
 toolbarMode = "minimal"

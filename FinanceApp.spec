@@ -14,7 +14,9 @@ datas = [
     # (來源, 放到 exe 裡的哪個資料夾)
     ("app.py", "."),
     ("db.py", "."),
-    ("models", "models"),
+    # 只打包 .py：整個資料夾會連 __pycache__ 一起帶進去，
+    # 裡面的 .pyc 記錄了打包電腦上的絕對路徑（可能含使用者名稱），不該出現在公開的下載檔
+    ("models/*.py", "models"),
     # 主題設定：Streamlit 會讀「app.py 旁邊的 .streamlit/config.toml」，
     # 所以放到和 app.py 同一層的 .streamlit 資料夾，exe 版就會套用一樣的配色和字型
     (".streamlit/config.toml", ".streamlit"),
