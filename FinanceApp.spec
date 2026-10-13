@@ -15,6 +15,9 @@ datas = [
     ("app.py", "."),
     ("db.py", "."),
     ("models", "models"),
+    # 主題設定：Streamlit 會讀「app.py 旁邊的 .streamlit/config.toml」，
+    # 所以放到和 app.py 同一層的 .streamlit 資料夾，exe 版就會套用一樣的配色和字型
+    (".streamlit/config.toml", ".streamlit"),
 ]
 binaries = []
 hiddenimports = []

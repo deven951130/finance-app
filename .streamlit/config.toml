@@ -4,7 +4,8 @@
 # - 主色用墨藍色，紅色和綠色只留給「漲跌」（台股習慣：紅漲綠跌）
 # - 背景用偏暖的米白色，像紙本帳本，比純白不刺眼
 #
-# 注意：打包成 exe 時不會讀到這個檔案，要在 run_app.py 加上對應的 --theme.* 參數
+# 打包成 exe 時，FinanceApp.spec 會把這個檔案放到 exe 裡 app.py 旁邊的 .streamlit/，
+# Streamlit 會自動讀取「主程式旁邊的 .streamlit/config.toml」。改完要重新打包 exe 才會生效。
 
 [client]
 # 隱藏右上角的 Deploy 等開發者按鈕

@@ -73,7 +73,7 @@ FINANCE_DB=data/example.db streamlit run app.py
 - 使用者輸入的文字放進 `unsafe_allow_html=True` 的 HTML 前，一定要 `html.escape()`。
 - Streamlit 每次互動都會**從頭重跑整個 `app.py`**；資料要存資料庫，改完資料後呼叫 `st.rerun()`。
 - `requirements-build.txt` 要保持**純 ASCII**（Windows 的 pip 用 cp950 讀，有中文會失敗）。
-- 改 `.streamlit/config.toml` 時，exe 版不會讀到這個檔，要同步考慮 `run_app.py` 的 `--theme.*` 參數（目前 exe 版還沒套用主題，見待辦）。
+- `.streamlit/config.toml` 由 `FinanceApp.spec` 打包到 exe 裡 `app.py` 旁邊的 `.streamlit/`（Streamlit 會讀「主程式旁邊」的設定檔），所以 exe 版也有主題；改完要重新打包才會生效。`run_app.py` 的命令列參數優先權比 config.toml 高，兩邊不要設成不一樣的值。
 - 改完畫面，除了 `pytest`，也用 `streamlit.testing.v1.AppTest` 或實際啟動，確認每一頁都打得開。
 
 ## Git 與 PR
@@ -88,13 +88,13 @@ FINANCE_DB=data/example.db streamlit run app.py
 - ✅ 第三階段：下單前檢查、交易紀錄、定期定額試算、CSV 匯出、範例資料、README 截圖
 - ✅ 打包成 exe（Windows / macOS）
 - ✅ 介面美化（主題、數字卡、圖表、側邊欄、手機版面）
+- ✅ exe 版套用主題
 
 下一步建議的待辦（完整清單和理由見 `docs/開發紀錄.md` 的「待辦」）：
-1. exe 版套用主題（`FinanceApp.spec` 打包 `config.toml` + `run_app.py` 切換工作資料夾）
-2. ETF 賣出交易稅是 0.1%（目前一律用 0.3%），手續費最低 20 元
-3. 加 LICENSE（公開 repo）
-4. 「已還一期」可重複按，需要還款紀錄
-5. 手上現金不會隨記帳／交易自動更新
-6. `db.py` 補測試（例如現金不夠時負債和現金都不變）
+1. ETF 賣出交易稅是 0.1%（目前一律用 0.3%），手續費最低 20 元
+2. 加 LICENSE（公開 repo）
+3. 「已還一期」可重複按，需要還款紀錄
+4. 手上現金不會隨記帳／交易自動更新
+5. `db.py` 補測試（例如現金不夠時負債和現金都不變）
 
 開始做任何一項之前，先跟使用者確認要做哪一項。
