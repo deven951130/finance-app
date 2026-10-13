@@ -1,8 +1,8 @@
 # Streamlit 外觀設定（用 streamlit run app.py 啟動時會自動讀取）
 #
-# 配色原則：
+# 設計概念是「存摺」：
+# - 背景是淡青灰的存摺紙，文字是墨色；金額和標題用宋體，像印在存摺上的字
 # - 主色用墨藍色，紅色和綠色只留給「漲跌」（台股習慣：紅漲綠跌）
-# - 背景用偏暖的米白色，像紙本帳本，比純白不刺眼
 #
 # 打包成 exe 時，FinanceApp.spec 會把這個檔案放到 exe 裡 app.py 旁邊的 .streamlit/，
 # Streamlit 會自動讀取「主程式旁邊的 .streamlit/config.toml」。改完要重新打包 exe 才會生效。
@@ -23,22 +23,30 @@ toolbarMode = "minimal"
 [theme]
 base = "light"
 primaryColor = "#2B4C7E"              # 墨藍：按鈕、勾選框、連結
-backgroundColor = "#F6F4EF"           # 米白：頁面背景
-secondaryBackgroundColor = "#ECE8DF"  # 輸入框底色
-textColor = "#1F2633"
-borderColor = "#E2DDD2"
+backgroundColor = "#EDF1EE"           # 存摺紙：頁面背景（淡青灰）
+secondaryBackgroundColor = "#E1E8E3"  # 輸入框底色
+textColor = "#1C2833"                 # 墨色
+borderColor = "#CCD6CF"
 showWidgetBorder = true
-baseRadius = "10px"
-buttonRadius = "8px"
-# 中文字型：有網路時用 Google 的思源黑體，沒網路就用系統內建的微軟正黑體 / 蘋方
-font = "Noto Sans TC:https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap, Microsoft JhengHei, PingFang TC, sans-serif"
-headingFontWeights = [700, 700, 600, 600, 600, 600]
+baseRadius = "8px"
+buttonRadius = "6px"
+# 中文字型：有網路時用 Google 的思源黑體，沒網路時瀏覽器會改用電腦內建的中文字型。
+# 注意：這個設定只能寫「一個字型名稱:網址」，後面再加備援字型會被當成網址的一部分
+font = "Noto Sans TC:https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap"
+# 標題和金額用宋體（思源宋體）。400 是明細金額、600～900 是標題和大數字。
+# 沒網路時的備援（Windows 的新細明體、Mac 的宋體）寫在 app.py 的 SERIF
+headingFont = "Noto Serif TC:https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@400;600;700;900&display=swap"
+headingFontWeights = [900, 700, 700, 600, 600, 600]
 metricValueFontWeight = 600
 metricValueFontSize = "1.65rem"
-# Streamlit 內建的紅、綠色（:red[...]、st.error 等）調成和圖表一致的顏色
+# Streamlit 內建的紅、綠色（:red[...]、st.metric 的漲跌小字）。
+# Streamlit 拿它們當文字色時會自己再調深，所以這裡寫比較亮的原色；
+# app.py 的 GAIN / LOSS 是直接當文字用的，所以那邊寫的是調深過的版本
 redColor = "#D64545"
 greenColor = "#1E9E6A"
-dataframeHeaderBackgroundColor = "#F1EEE7"
+# 超支、先不要下單用的橘色，和 app.py 的 WARN 一樣（紅綠只留給漲跌）
+orangeColor = "#A04E17"
+dataframeHeaderBackgroundColor = "#E6ECE8"
 chartCategoricalColors = ["#2B4C7E", "#C9973F", "#6C8EBF", "#8A6FB0", "#4F9A94", "#B7B1A5"]
 
 # 側邊欄：深墨藍底、淺色字

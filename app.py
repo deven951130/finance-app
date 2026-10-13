@@ -7,15 +7,17 @@ Streamlit 的運作方式和一般程式不太一樣：
 每次你在網頁上按按鈕或改數字，整個 app.py 會「從頭到尾重新跑一次」。
 所以資料都要存在資料庫裡，每次重跑時再讀出來。
 
+外觀的設計概念是「存摺」：淡青灰的紙、墨色的字、金額用宋體，明細一列一列用橫線隔開。
 外觀分成兩層：
 - .streamlit/config.toml：整體配色、字型、圓角（Streamlit 內建的主題設定）
-- 這個檔案的 inject_css()：少量 CSS，做卡片陰影、預算進度條、手機版面這些主題設定做不到的部分
+- 這個檔案的 inject_css()：少量 CSS，做存摺式明細、摘要列、總覽的結餘、手機版面這些主題設定做不到的部分
 
 檔案由上到下：配色與 CSS → 共用小工具 → 各頁面函式 → 側邊欄 → 主程式
 """
 
 import html
 import os
+import re
 from datetime import date
 
 import altair as alt  # 安裝 streamlit 時會一起裝好，用來畫圖表
@@ -46,16 +48,29 @@ db.init_db()
 # ---------- 配色 ----------
 # 和 .streamlit/config.toml 用同一組顏色，圖表和自訂 HTML 才會一致
 
+TEXT = "#1C2833"     # 文字：墨色
+PAPER = "#FAFBF9"    # 卡片底色：比頁面的存摺紙（#EDF1EE）亮一點
 INK = "#2B4C7E"      # 主色：墨藍
-GOLD = "#C9973F"     # 強調色：金色（存下來的錢、快用完的預算）
-GAIN = "#D64545"     # 賺錢：紅（台股習慣）
-LOSS = "#1E9E6A"     # 賠錢：綠（台股習慣）
-WARN = "#E07B24"     # 超支：橘（刻意不用紅色，避免和「賺錢紅」搞混）
-MUTED = "#6B7280"    # 次要文字：灰（對白底約 4.8:1，符合一般建議的 4.5:1）
+GOLD = "#C9973F"     # 強調色：金色（存下來的錢、快用完的預算），用在進度條和圖表
+GOLD_TEXT = "#7E5B1C"  # 金色當「小字」用時的深色版（原本的金色在淡底上對比只有約 2.3:1，看不清楚）
+# 賺錢紅、賠錢綠（台股習慣）。這兩個顏色主要用在小字上，所以調得比較深：
+# 在存摺紙底色上對比分別約 4.9:1、4.7:1（一般建議小字至少 4.5:1）
+GAIN = "#B83B3B"
+LOSS = "#147A53"
+# 超支、先不要下單：橘。刻意不用紅色，避免和「賺錢紅」搞混。
+# 這個橘色也用在小字上，所以調得比較深：對存摺紙底色約 5.1:1、對卡片底色約 5.6:1
+WARN = "#A04E17"
+MUTED = "#5F6672"    # 次要文字：灰（對存摺紙底色約 5:1）
 CHART_COLORS = ["#2B4C7E", "#C9973F", "#6C8EBF", "#8A6FB0", "#4F9A94", "#B7B1A5"]
 
-# 每個記帳類別配一個小圖示，表格和進度條比較好認
-CATEGORY_ICONS = {"吃飯": "🍱", "約會禮物": "🎁", "交通": "🚇", "其他": "🧺"}
+# 每個記帳類別一個顏色，和「預算分配」圓餅圖用同一組，看圖就知道哪一塊是哪個類別。
+# 刻意不用墨藍和金色：這兩個顏色在預算進度條上代表「正常」和「快用完」，避免同一個顏色有兩種意思
+# （dict(zip(...)) 把兩個清單一對一配成字典，像 C++ 用兩個陣列建 std::map）
+CATEGORY_COLORS = dict(zip(CATEGORIES, ["#6C8EBF", "#8A6FB0", "#4F9A94", "#B7B1A5"]))
+
+# 金額用的字型：宋體。思源宋體由 config.toml 的 headingFont 載入；
+# 沒網路時依序改用 Windows 的新細明體、Mac 的宋體
+SERIF = '"Noto Serif TC", PMingLiU, "Songti TC", serif'
 
 
 def inject_css() -> None:
@@ -64,103 +79,160 @@ def inject_css() -> None:
     st.container(key="card_xxx") 會在 HTML 加上 class「st-key-card_xxx」，
     所以下面用 [class*="st-key-card"] 就能選到所有「卡片」，不用依賴 Streamlit 內部的結構。
     """
-    st.markdown("""
+    # 用 f-string 是為了把上面的顏色常數放進 CSS；CSS 本身的大括號要寫兩個 {{ }} 才不會被當成變數
+    st.markdown(f"""
 <style>
 /* 內容區最大寬度，大螢幕上不會拉得太開 */
-.block-container { max-width: 1240px; padding-top: 2.2rem; padding-bottom: 3rem; }
-header[data-testid="stHeader"] { background: transparent; }
+.block-container {{ max-width: 1240px; padding-top: 2.2rem; padding-bottom: 3rem; }}
+header[data-testid="stHeader"] {{ background: transparent; }}
 
-/* 數字卡（st.metric(border=True)）和自訂卡片：白底、柔和陰影 */
-div[data-testid="stMetric"], [class*="st-key-card"] {
-    background: #FFFFFF;
-    box-shadow: 0 1px 2px rgba(31, 38, 51, .04), 0 4px 14px rgba(31, 38, 51, .05);
-}
-div[data-testid="stMetric"] { padding: 16px 20px; min-height: 160px; }
-div[data-testid="stMetricLabel"] p { color: #5F6672; font-size: .9rem; }
-[class*="st-key-card"] { padding: 20px 22px; border-radius: 14px; }
+/* 金額一律用宋體，像印在存摺上的數字；tabular-nums 讓每個數字一樣寬，上下才對得齊 */
+div[data-testid="stMetricValue"], .hero-num, .big-num,
+.ledger-row > div:last-child, section[data-testid="stSidebar"] .side-sum b {{
+    font-family: {SERIF}; font-variant-numeric: tabular-nums;
+}}
 
-/* 頁首：標題 + 一行說明 */
-.page-head { margin-bottom: 1.2rem; }
-.page-head h1 { font-size: 2rem; margin: 0; padding: 0; letter-spacing: .02em; }
-.page-head p { color: #5F6672; margin: .25rem 0 0; }
+/* 自訂卡片：平的，不加陰影，只用一條細框線，像存摺裡的一頁 */
+[class*="st-key-card"] {{ background: {PAPER}; border: 1px solid #CCD6CF; border-radius: 8px;
+                          padding: 20px 22px; }}
+
+/* 摘要列（一排數字）：上面一條墨色粗線、下面一條細線，格子之間用直線隔開，
+   取代一張一張分開的數字卡。summary_strip() 建出來的容器 key 都以 strip_ 開頭 */
+[class*="st-key-strip"] {{ border-top: 2px solid {TEXT}; border-bottom: 1px solid #CCD6CF;
+                           margin-bottom: .4rem; }}
+[class*="st-key-strip"] div[data-testid="stHorizontalBlock"] {{ gap: 0; }}
+[class*="st-key-strip"] div[data-testid="stMetric"] {{ padding: 12px 20px 14px; }}
+[class*="st-key-strip"] div[data-testid="stColumn"]:first-child div[data-testid="stMetric"] {{ padding-left: 0; }}
+/* 格子之間的直線畫在「欄」上而不是數字上：同一排的欄一樣高，
+   某一格多一行小字（例如報酬率）時，直線也不會一長一短 */
+[class*="st-key-strip"] div[data-testid="stColumn"] + div[data-testid="stColumn"] {{
+    border-left: 1px solid #CCD6CF;
+}}
+div[data-testid="stMetricLabel"] p {{ color: {MUTED}; font-size: .9rem; }}
+
+/* 頁首：宋體大標題 + 一行說明 */
+.page-head {{ margin-bottom: 1.2rem; }}
+/* 字型在這裡再寫一次：config.toml 的 headingFont 只能寫一個字型，沒網路時要靠這裡的新細明體等備援 */
+.page-head h1 {{ font-family: {SERIF}; font-size: 2.1rem; margin: 0; padding: 0; letter-spacing: .04em; }}
+.page-head p {{ color: {MUTED}; margin: .3rem 0 0; }}
 
 /* 卡片內的小標題 */
-.card-title { font-weight: 700; font-size: 1.05rem; margin: 0 0 .6rem; color: #1F2633; }
-.card-title span { color: #6B7280; font-weight: 400; font-size: .85rem; margin-left: .4rem; }
+.card-title {{ font-weight: 700; font-size: 1.05rem; margin: 0 0 .6rem; color: {TEXT}; }}
+.card-title span {{ color: {MUTED}; font-weight: 400; font-size: .85rem; margin-left: .4rem; }}
 
-/* 帳本式的明細：左邊項目、右邊金額，最後一列是合計 */
-.ledger { width: 100%; }
-.ledger-row { display: flex; justify-content: space-between; padding: 7px 0;
-              border-bottom: 1px dashed #E2DDD2; font-variant-numeric: tabular-nums; }
-.ledger-row.total { border-bottom: none; border-top: 2px solid #1F2633;
-                    margin-top: 4px; font-weight: 700; font-size: 1.05rem; }
-.ledger-row .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%;
-                   margin-right: 8px; vertical-align: 1px; }
+/* 類別、項目前面的小圓點 */
+.dot {{ display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+        margin-right: 8px; vertical-align: 1px; }}
+
+/* 存摺式明細：左邊項目、右邊金額，每列一條細橫線。
+   合計那一列上面畫「雙線」：這是會計帳本上表示「以下是合計」的寫法 */
+.ledger {{ width: 100%; }}
+.ledger-row {{ display: flex; justify-content: space-between; gap: 1rem; padding: 7px 0;
+               border-bottom: 1px solid #DCE3DE; }}
+.ledger-row.total {{ border-bottom: none; border-top: 3px double {TEXT};
+                     margin-top: 2px; font-weight: 700; font-size: 1.05rem; }}
+.ledger-row .sub {{ font-size: .82rem; margin-left: .5rem; }}
+/* 金額不要斷行（「100,000 元」被拆成兩行很難讀）；窄的時候讓左邊的項目名稱去縮 */
+.ledger-row > div:first-child {{ min-width: 0; }}
+.ledger-row > div:last-child {{ white-space: nowrap; }}
+
+/* 總覽的結餘：整個 app 唯一的「主角」。不放在卡片裡，直接印在存摺紙上 */
+/* 左欄寬度跟著數字走（auto），數字一定不斷行：「1,234,56 / 7 元」這種斷法會讓人讀錯金額。
+   字級用 clamp()：視窗窄時自動縮小，最小 2.4rem、最大 3.6rem */
+.hero {{ display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3rem;
+         align-items: end; border-top: 2px solid {TEXT}; padding: 1rem 0 .4rem; }}
+.hero-label {{ color: {MUTED}; }}
+.hero-num {{ font-size: clamp(2.4rem, 4.2vw, 3.6rem); font-weight: 700; line-height: 1.1; color: {TEXT};
+             white-space: nowrap; }}
+.hero-num small {{ font-size: 1.2rem; font-weight: 600; margin-left: .4rem; color: {MUTED}; }}
+.hero-note {{ font-size: .85rem; color: {MUTED}; margin-top: .3rem; }}
+
+/* 自律提醒：存摺的「摘要」欄，左邊兩個字的標籤、右邊一句說明 */
+.notices {{ margin: .2rem 0 1.2rem; }}
+.notice {{ display: flex; gap: 1rem; padding: 8px 0; border-bottom: 1px solid #CCD6CF; }}
+.notice b {{ flex: 0 0 auto; min-width: 2.5em; }}
+
+/* 下單前檢查的結論：大大的一句判斷，旁邊列原因 */
+.verdict {{ display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2.5rem; align-items: start;
+            border-top: 2px solid {TEXT}; border-bottom: 1px solid #CCD6CF; padding: 1rem 0 1.1rem;
+            margin-bottom: 1.2rem; }}
+.verdict-word {{ font-family: {SERIF}; font-size: 2.6rem; font-weight: 900; line-height: 1.15;
+                 white-space: nowrap; color: var(--tone); }}
+.verdict ul {{ margin: .3rem 0 0; padding-left: 1.1rem; }}
+.verdict li {{ margin: .1rem 0; }}
+.verdict p {{ margin: .6rem 0 0; }}
 
 /* 預算進度條 */
-.budget { margin: 4px 0 14px; }
-.budget-top { display: flex; justify-content: space-between; font-size: .92rem;
-              font-variant-numeric: tabular-nums; }
-.budget-top b { font-weight: 600; }
-.budget-track { height: 10px; background: #ECE8DF; border-radius: 99px; margin: 6px 0 3px; overflow: hidden; }
-.budget-fill { height: 100%; border-radius: 99px; }
-.budget-note { font-size: .8rem; color: #5F6672; }
+.budget {{ margin: 4px 0 14px; }}
+.budget-top {{ display: flex; justify-content: space-between; font-size: .92rem;
+               font-variant-numeric: tabular-nums; }}
+.budget-top b {{ font-weight: 600; }}
+.budget-track {{ height: 10px; background: #E1E8E3; border-radius: 99px; margin: 6px 0 3px; overflow: hidden; }}
+.budget-fill {{ height: 100%; border-radius: 99px; }}
+.budget-note {{ font-size: .8rem; color: {MUTED}; }}
 
 /* 卡片裡的大數字（例如負債的剩餘金額） */
-.big-label { font-size: .85rem; color: #5F6672; }
-.big-num { font-size: 1.55rem; font-weight: 600; font-variant-numeric: tabular-nums; margin-bottom: .6rem; }
+.big-label {{ font-size: .85rem; color: {MUTED}; }}
+.big-num {{ font-size: 1.55rem; font-weight: 600; margin-bottom: .6rem; }}
 
 /* 小標籤（例如「當沖」「已還清」） */
-.chip { display: inline-block; white-space: nowrap; padding: 1px 10px; border-radius: 99px; font-size: .8rem;
-        font-weight: 600; line-height: 1.6; }
+.chip {{ display: inline-block; white-space: nowrap; padding: 1px 10px; border-radius: 99px; font-size: .8rem;
+         font-weight: 600; line-height: 1.6; }}
 
-/* 側邊欄 */
-section[data-testid="stSidebar"] .brand { font-size: 1.25rem; font-weight: 700; margin: 0 0 2px; }
-section[data-testid="stSidebar"] .brand-sub { font-size: .8rem; opacity: .75; margin-bottom: 1rem; }
-section[data-testid="stSidebar"] .nav-group { font-size: .72rem; letter-spacing: .12em;
-    opacity: .75; margin: 1rem 0 .2rem .2rem; }
-section[data-testid="stSidebar"] .side-sum { background: rgba(255,255,255,.06);
-    border: 1px solid rgba(255,255,255,.08); border-radius: 12px; padding: 12px 14px; margin-top: 1.2rem; }
-section[data-testid="stSidebar"] .side-sum div { display: flex; justify-content: space-between;
-    font-size: .85rem; padding: 3px 0; font-variant-numeric: tabular-nums; }
-section[data-testid="stSidebar"] .side-sum span { opacity: .8; }
+/* 側邊欄：深色的存摺封面 */
+section[data-testid="stSidebar"] .brand {{ font-family: {SERIF}; font-size: 1.4rem; font-weight: 900;
+    letter-spacing: .08em; margin: 0 0 2px; }}
+section[data-testid="stSidebar"] .brand-sub {{ font-size: .8rem; opacity: .75; margin-bottom: 1rem; }}
+section[data-testid="stSidebar"] .nav-group {{ font-size: .75rem; letter-spacing: .12em;
+    opacity: .75; margin: 1rem 0 .2rem .2rem; }}
+section[data-testid="stSidebar"] .side-sum {{ border-top: 1px solid rgba(255,255,255,.25);
+    padding: 10px 2px 0; margin-top: 1.2rem; }}
+section[data-testid="stSidebar"] .side-sum div {{ display: flex; justify-content: space-between;
+    font-size: .85rem; padding: 3px 0; }}
+section[data-testid="stSidebar"] .side-sum span {{ opacity: .8; }}
 
-/* 列表裡的刪除按鈕：平常淡淡的，滑過才變紅 */
-button[kind="tertiary"] { color: #6B7280; }
-button[kind="tertiary"]:hover { color: #D64545; }
+/* 列表裡的刪除按鈕：平常淡淡的，滑過才變橘色（紅色留給漲跌） */
+button[kind="tertiary"] {{ color: {MUTED}; }}
+button[kind="tertiary"]:hover {{ color: {WARN}; }}
 
 /* 表單送出按鈕撐滿一點，比較好按 */
-div[data-testid="stFormSubmitButton"] button { min-width: 120px; }
+div[data-testid="stFormSubmitButton"] button {{ min-width: 120px; }}
 
 /* ---------- 手機（寬度 640px 以下） ----------
    Streamlit 在窄螢幕會把每個欄位都疊成一行，明細列表就會被拉得很長。
    列表卡片的 key 都以 _list 結尾，這裡讓它們的每一列保持橫排。 */
-@media (max-width: 640px) {
-    .block-container { padding-left: 1rem; padding-right: 1rem; padding-top: 1.2rem; }
-    .page-head h1 { font-size: 1.6rem; }
-    div[data-testid="stMetric"] { min-height: 0; padding: 12px 16px; }
-    [class*="st-key-card"] { padding: 16px 14px; }
-    [class*="st-key-card"][class*="_list"] div[data-testid="stHorizontalBlock"] {
+@media (max-width: 640px) {{
+    .block-container {{ padding-left: 1rem; padding-right: 1rem; padding-top: 1.2rem; }}
+    .page-head h1 {{ font-size: 1.7rem; }}
+    [class*="st-key-card"] {{ padding: 16px 14px; }}
+    [class*="st-key-card"][class*="_list"] div[data-testid="stHorizontalBlock"] {{
         flex-wrap: nowrap; gap: .35rem;
-    }
-    [class*="st-key-card"][class*="_list"] div[data-testid="stColumn"] {
+    }}
+    [class*="st-key-card"][class*="_list"] div[data-testid="stColumn"] {{
         min-width: 0 !important; overflow-wrap: anywhere;
-    }
-    [class*="st-key-card"][class*="_list"] p { font-size: .82rem; }
-    /* 數字卡一列放兩張，不要一張佔滿一整列 */
-    div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"] div[data-testid="stMetric"]) {
-        flex-wrap: wrap; gap: .6rem;
-    }
-    div[data-testid="stHorizontalBlock"]:has(> div[data-testid="stColumn"] div[data-testid="stMetric"]) > div[data-testid="stColumn"] {
-        min-width: calc(50% - .3rem) !important; width: calc(50% - .3rem) !important;
-        flex: 1 1 calc(50% - .3rem) !important;
-    }
-    div[data-testid="stMetricValue"] div { font-size: 1.25rem; }
+    }}
+    [class*="st-key-card"][class*="_list"] p {{ font-size: .82rem; }}
+    /* 摘要列一列放兩格，不要一格佔滿一整列；格子之間改用底線分開 */
+    [class*="st-key-strip"] {{ border-bottom: none; }}
+    [class*="st-key-strip"] div[data-testid="stHorizontalBlock"] {{ flex-wrap: wrap; }}
+    [class*="st-key-strip"] div[data-testid="stColumn"] {{
+        min-width: 50% !important; width: 50% !important; flex: 1 1 50% !important;
+        border-left: none !important; border-bottom: 1px solid #CCD6CF;
+    }}
+    [class*="st-key-strip"] div[data-testid="stMetric"],
+    [class*="st-key-strip"] div[data-testid="stColumn"]:first-child div[data-testid="stMetric"] {{
+        padding: 10px 8px 10px 0;
+    }}
+    div[data-testid="stMetricValue"] div {{ font-size: 1.25rem; }}
+    /* 結餘和下單結論改成上下排 */
+    .hero, .verdict {{ grid-template-columns: minmax(0, 1fr); gap: .8rem; }}
+    .hero-num {{ font-size: 2.6rem; }}
+    .verdict-word {{ font-size: 2rem; }}
     /* 刪除按鈕只留垃圾桶圖示，省空間 */
-    [class*="st-key-card"][class*="_list"] button[kind="tertiary"] div[data-testid="stMarkdownContainer"] {
+    [class*="st-key-card"][class*="_list"] button[kind="tertiary"] div[data-testid="stMarkdownContainer"] {{
         display: none;
-    }
-}
+    }}
+}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -220,17 +292,46 @@ def card_title(title: str, note: str = "") -> None:
     st.markdown(f'<div class="card-title">{title}{extra}</div>', unsafe_allow_html=True)
 
 
-def ledger(rows: list[tuple[str, str, str]]) -> None:
-    """畫帳本式明細。rows 是 [(顏色, 項目, 金額), ...]，最後一列當作合計。
+def ledger_html(rows: list[tuple[str, str, str]], total: bool = True) -> str:
+    """存摺式明細的 HTML。rows 是 [(顏色, 項目, 金額), ...]。
 
     顏色是項目前面的小圓點，空字串就不畫。
+    total=True 時最後一列當作合計（上面畫雙線）；總覽的結餘用 total=False，因為合計就是旁邊的大數字。
     """
     parts = []
     for i, (color, label, amount) in enumerate(rows):
-        cls = "ledger-row total" if i == len(rows) - 1 else "ledger-row"
+        cls = "ledger-row total" if total and i == len(rows) - 1 else "ledger-row"
         dot = f'<span class="dot" style="background:{color}"></span>' if color else ""
         parts.append(f'<div class="{cls}"><div>{dot}{label}</div><div>{amount}</div></div>')
-    st.markdown(f'<div class="ledger">{"".join(parts)}</div>', unsafe_allow_html=True)
+    return f'<div class="ledger">{"".join(parts)}</div>'
+
+
+def ledger(rows: list[tuple[str, str, str]]) -> None:
+    """畫存摺式明細，最後一列是合計（格式見 ledger_html）。"""
+    st.markdown(ledger_html(rows), unsafe_allow_html=True)
+
+
+def plain(text: str) -> str:
+    """使用者自己輸入的文字，放進 st.write / st.markdown / st.toast 之前先用這個處理。
+
+    Markdown 會把一些符號當成格式：兩個 $ 中間變成數學公式、** 變成粗體……
+    在每個標點符號前面加一個反斜線，Markdown 就會照原樣顯示（像 C++ 字串裡用 \\" 表示引號）。
+    """
+    return re.sub(r"([\\`*_{}\[\]()#+\-.!|$~<>])", r"\\\1", text)
+
+
+def done(message: str) -> None:
+    """存檔成功後呼叫：記下要顯示的通知，然後立刻重跑整頁。
+
+    為什麼一定要重跑：
+    - 側邊欄的摘要在頁面內容之前就畫好了，不重跑會顯示存檔前的舊數字。
+    - 沒有 key 的輸入框會把「預設值」算進自己的身分；資料庫的值變了卻不重跑，
+      下一次輸入的數字會被當成另一個輸入框而丟掉（連按兩次「儲存」，第二次會沒存到）。
+    通知先放進 st.session_state（重跑之間會保留的字典），重跑後由主程式用 st.toast 顯示。
+    不用 st.success：它是綠色，而綠色在這個 app 代表「賠錢」。
+    """
+    st.session_state["toast"] = message
+    st.rerun()
 
 
 def progress_bar(label: str, value: float, target: float, color: str, note: str,
@@ -253,11 +354,14 @@ def budget_bar(label: str, spent: float, budget: float) -> None:
     """一個類別的預算進度條。
 
     顏色：用不到 8 成是墨藍、8 成到滿是金色（提醒）、超過就是橘色（超支）。
+    標題旁邊刻意不放類別圓點：進度條的顏色已經代表「狀態」，旁邊再放一個代表「類別」的顏色，
+    同一列就有兩種顏色意思，容易看錯。
     """
     if budget > 0:
         ratio = spent / budget
     else:
-        ratio = 1.0 if spent > 0 else 0.0
+        # 預算是 0 卻有花錢，一定是超支；用無限大讓它走「超支」的橘色（長度另外限制在 100%）
+        ratio = float("inf") if spent > 0 else 0.0
     color = INK if ratio < 0.8 else (GOLD if ratio <= 1 else WARN)
     left = budget - spent
     if left >= 0:
@@ -265,6 +369,35 @@ def budget_bar(label: str, spent: float, budget: float) -> None:
     else:
         note = f'<span style="color:{WARN};font-weight:600">超支 {money(-left)}</span>'
     progress_bar(label, spent, budget, color, note, ratio)
+
+
+def category_label(category: str) -> str:
+    """類別名稱前面加上它的顏色圓點（HTML）。顏色和「預算分配」圓餅圖一致。"""
+    color = CATEGORY_COLORS.get(category, MUTED)
+    return f'<span class="dot" style="background:{color}"></span>{html.escape(category)}'
+
+
+def summary_strip(key: str, n: int) -> list:
+    """一排摘要數字（存摺式）：回傳 n 個欄位，每個欄位放一個 st.metric。
+
+    外面包一個 key 以 strip_ 開頭的容器，inject_css() 才選得到它、畫出上下的橫線。
+    """
+    return st.container(key=f"strip_{key}").columns(n)
+
+
+def notices(rows: list[tuple[str, str, str]]) -> None:
+    """自律提醒（例如當沖、持股太集中），畫成存摺的「摘要」欄。
+
+    rows 是 [(標籤, 說明, 顏色), ...]，標籤是兩個字，例如「當沖」。
+    說明會直接放進 HTML，裡面如果有使用者輸入的文字，呼叫前要先 html.escape()。
+
+    為什麼不用 st.error / st.warning：st.error 是紅色塊，而紅色在這個 app 代表「賺錢」；
+    st.warning 的黃色塊像系統訊息。自律提醒是這個 app 自己的判斷，用存摺的樣式。
+    （st.warning 只留給「輸入錯誤」這類系統訊息。）
+    """
+    parts = [f'<div class="notice"><b style="color:{color}">{tag}</b><span>{text}</span></div>'
+             for tag, text, color in rows]
+    st.markdown(f'<div class="notices">{"".join(parts)}</div>', unsafe_allow_html=True)
 
 
 def big_number(label: str, value: str) -> str:
@@ -277,29 +410,32 @@ def chip(text: str, color: str) -> str:
     return f'<span class="chip" style="background:{color}1F;color:{color}">{html.escape(text)}</span>'
 
 
-def donut(data: pd.DataFrame, label: str, value: str, center_text: str) -> alt.Chart:
+def donut(data: pd.DataFrame, label: str, value: str, center_text: str,
+          colors: list[str] | None = None) -> alt.Chart:
     """甜甜圈圖：看每一塊占多少比例（持股占比、預算分配都用它）。
 
     center_text 是圓圈中間的字，例如總金額。
+    colors 是每一塊的顏色（照資料順序）；沒給就用 CHART_COLORS。
     """
     data = data.assign(順序=range(len(data)))  # 甜甜圈一塊一塊照資料順序畫
     base = alt.Chart(data).encode(
         theta=alt.Theta(f"{value}:Q", stack=True),
         # sort：圖例照資料原本的順序排，不要變成依筆畫排序
-        color=alt.Color(f"{label}:N", sort=list(data[label]), scale=alt.Scale(range=CHART_COLORS),
+        color=alt.Color(f"{label}:N", sort=list(data[label]), scale=alt.Scale(range=colors or CHART_COLORS),
                         legend=alt.Legend(title=None, orient="right", labelFontSize=13)),
         order=alt.Order("順序:Q"),
         tooltip=[alt.Tooltip(f"{label}:N"), alt.Tooltip(f"{value}:Q", format=",.0f")],
     )
-    ring = base.mark_arc(innerRadius=62, outerRadius=100, stroke="#FFFFFF", strokeWidth=2)
+    # 每一塊之間的縫用卡片底色，看起來像切開的
+    ring = base.mark_arc(innerRadius=62, outerRadius=100, stroke=PAPER, strokeWidth=2)
     center = alt.Chart(pd.DataFrame({"t": [center_text]})).mark_text(
-        fontSize=15, fontWeight=600, color="#1F2633"
+        fontSize=16, fontWeight=700, color=TEXT, font=SERIF.replace('"', "")
     ).encode(text="t:N")
     return (ring + center).properties(height=230)
 
 
 def show_chart(chart: alt.Chart) -> None:
-    """顯示 Altair 圖表：背景透明、拿掉外框，讓圖表融入白色卡片。"""
+    """顯示 Altair 圖表：背景透明、拿掉外框，讓圖表融入卡片。"""
     st.altair_chart(chart.properties(background="transparent").configure_view(stroke=None),
                     width="stretch")
 
@@ -313,7 +449,7 @@ def delete_button(key: str) -> bool:
 
 def page_overview() -> None:
     today = date.today()
-    page_header("總覽", f"{today.year} 年 {today.month} 月 {today.day} 日・現金、投資、負債一次看完")
+    page_header("總覽", "現金、投資、負債一次看完")
 
     settings = db.get_settings()
     cash = settings["cash_on_hand"]
@@ -323,28 +459,32 @@ def page_overview() -> None:
     debts = db.get_debts()
     total_debt = sum(d["remaining"] for d in debts)
 
-    # --- 上排四張數字卡 ---
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("淨資產", money(cash + total_value - total_debt),
-              help="手上現金 + 股票市值 − 負債餘額", border=True)
-    c2.metric("手上現金", money(cash), border=True)
-    # delta_color="inverse"：正數紅、負數綠，剛好是台股習慣
-    c3.metric("股票市值", money(total_value),
-              delta=signed_money(total_profit) if total_profit else None,
-              delta_color="inverse", help="下面的小字是總損益", border=True)
-    c4.metric("負債餘額", money(total_debt), border=True)
+    # --- 結餘：整個 app 的主角。左邊一個大數字，右邊是它怎麼算出來的 ---
+    stock_label = "+ 股票市值"
+    if total_profit:
+        stock_label += f'<span class="sub">損益 {colored_money_html(total_profit)}</span>'
+    hero_rows = ledger_html([("", "手上現金", money(cash)),
+                             ("", stock_label, money(total_value)),
+                             ("", "− 負債餘額", money(total_debt))], total=False)
+    st.markdown(
+        f'<div class="hero"><div><div class="hero-label">淨資產</div>'
+        f'<div class="hero-num">{cash + total_value - total_debt:,.0f}<small>元</small></div>'
+        f'<div class="hero-note">{today.year} 年 {today.month} 月 {today.day} 日的結餘</div></div>'
+        f'{hero_rows}</div>',
+        unsafe_allow_html=True,
+    )
 
     # --- 提醒：持股集中度、本月當沖 ---
-    for m in over_concentrated(analyzed):
-        st.warning(
-            f"{m['name']}（{m['symbol']}）占總市值 {m['weight']:.1%}，"
-            f"超過 {CONCENTRATION_LIMIT:.0%}，風險過度集中", icon="⚠️"
-        )
+    # 股票名稱和代號是自己輸入的，放進 HTML 前先 html.escape，避免畫面壞掉
+    alerts = [("集中", f"{html.escape(m['name'])}（{html.escape(m['symbol'])}）"
+                       f"占總市值 {m['weight']:.1%}，超過 {CONCENTRATION_LIMIT:.0%}，風險過度集中。", WARN)
+              for m in over_concentrated(analyzed)]
     day_trades = count_day_trades(db.get_trades(), today.year, today.month)
     if day_trades > 0:
-        st.error(f"本月已經當沖 {day_trades} 次，請停下來檢討", icon="🚨")
+        alerts.append(("當沖", f"本月已經當沖 {day_trades} 次，請停下來檢討。", WARN))
     else:
-        st.success("本月當沖 0 次，繼續保持", icon="👍")
+        alerts.append(("當沖", "本月 0 次，繼續保持。", INK))
+    notices(alerts)
 
     # --- 每月現金流 + 持股占比 ---
     income = settings["monthly_income"]
@@ -380,7 +520,7 @@ def page_overview() -> None:
             (GOLD, "= 每月可存", money(savings)),
         ])
         if savings < 0:
-            st.error(f"每月入不敷出 {money(-savings)}")
+            notices([("超支", f"每月入不敷出 {money(-savings)}。", WARN)])
 
     with right, st.container(key="card_weights"):
         card_title("持股占比", f"上限 {CONCENTRATION_LIMIT:.0%}")
@@ -400,7 +540,7 @@ def page_overview() -> None:
         cols = st.columns(2)
         for i, c in enumerate(CATEGORIES):
             with cols[i % 2]:
-                budget_bar(f"{CATEGORY_ICONS.get(c, '')} {c}", spent[c], budgets.get(c, 0.0))
+                budget_bar(c, spent[c], budgets.get(c, 0.0))
 
 
 # ---------- 頁面：記帳 ----------
@@ -417,19 +557,18 @@ def page_expenses() -> None:
         # clear_on_submit=True：送出後清空輸入框，方便記下一筆
         with st.form("add_expense", clear_on_submit=True, border=False):
             amount = st.number_input("金額", min_value=0.0, step=10.0, format="%.0f")
-            category = st.selectbox("類別", CATEGORIES,
-                                    format_func=lambda c: f"{CATEGORY_ICONS.get(c, '')} {c}")
+            category = st.selectbox("類別", CATEGORIES)
             expense_date = st.date_input("日期", value=today)
             note = st.text_input("備註（可不填）")
             submitted = st.form_submit_button("新增", type="primary", icon=":material/add:")
 
         if submitted:
             if amount <= 0:
-                st.error("金額要大於 0")
+                st.warning("金額要大於 0")
             else:
                 # date 物件轉成 'YYYY-MM-DD' 字串存進資料庫
                 db.add_expense(amount, category, expense_date.isoformat(), note)
-                st.success(f"已記下：{category} {money(amount)}")
+                done(f"已記下：{category} {money(amount)}")
 
     # --- 本月統計 ---
     month_expenses = db.get_expenses_in_month(today.year, today.month)
@@ -438,19 +577,20 @@ def page_expenses() -> None:
     total_spent = sum(e["amount"] for e in month_expenses)
 
     with stat_col:
-        m1, m2 = st.columns(2)
+        m1, m2 = summary_strip("expenses", 2)
         if remaining >= 0:
-            m1.metric("本月還能花", money(remaining), border=True)
+            m1.metric("本月還能花", money(remaining))
         else:
+            # 超支用橘色（config.toml 的 orangeColor），紅色留給漲跌
             m1.metric("本月還能花", money(remaining), delta="已超支",
-                      delta_color="inverse", border=True)
-        m2.metric("本月已花", money(total_spent), border=True)
+                      delta_color="orange", delta_arrow="off")
+        m2.metric("本月已花", money(total_spent))
 
         with st.container(key="card_budget_bars"):
             card_title(f"{today.year} 年 {today.month} 月各類別")
             spent = spent_by_category(month_expenses)
             for c in CATEGORIES:
-                budget_bar(f"{CATEGORY_ICONS.get(c, '')} {c}", spent[c], budgets.get(c, 0.0))
+                budget_bar(c, spent[c], budgets.get(c, 0.0))
 
     # --- 本月明細 ---
     with st.container(key="card_expense_list"):
@@ -465,9 +605,9 @@ def page_expenses() -> None:
         for e in month_expenses:
             col1, col2, col3, col4, col5 = st.columns(widths, vertical_alignment="center")
             col1.write(e["date"])
-            col2.write(f"{CATEGORY_ICONS.get(e['category'], '')} {e['category']}")
+            col2.markdown(category_label(e["category"]), unsafe_allow_html=True)
             col3.write(f"**{money(e['amount'])}**")
-            col4.write(e["note"] or "")
+            col4.write(plain(e["note"] or ""))
             # 每個按鈕需要唯一的 key，所以用支出的 id
             with col5:
                 if delete_button(f"del_exp_{e['id']}"):
@@ -489,24 +629,24 @@ def page_budgets() -> None:
             cols = st.columns(2)
             for i, c in enumerate(CATEGORIES):
                 new_budgets[c] = cols[i % 2].number_input(
-                    f"{CATEGORY_ICONS.get(c, '')} {c}", min_value=0.0, step=100.0, format="%.0f",
+                    c, min_value=0.0, step=100.0, format="%.0f",
                     value=float(budgets.get(c, 0.0))
                 )
             if st.form_submit_button("儲存", type="primary", icon=":material/save:"):
                 db.save_budgets(new_budgets)
-                st.success("預算已儲存")
+                done("預算已儲存")
 
     total = sum(new_budgets.values())
-    with chart_col:
-        st.metric("每月生活預算合計", money(total), border=True)
-        with st.container(key="card_budget_split"):
-            card_title("預算分配")
-            if total > 0:
-                split = pd.DataFrame({"類別": list(new_budgets.keys()),
-                                      "金額": list(new_budgets.values())})
-                show_chart(donut(split, "類別", "金額", money(total)))
-            else:
-                st.info("還沒有設定預算")
+    with chart_col, st.container(key="card_budget_split"):
+        # 合計寫在標題旁邊，圓餅圖中間也會再寫一次，不另外放一張數字卡
+        card_title("預算分配", f"每月合計 {money(total)}")
+        if total > 0:
+            split = pd.DataFrame({"類別": list(new_budgets.keys()),
+                                  "金額": list(new_budgets.values())})
+            show_chart(donut(split, "類別", "金額", money(total),
+                             colors=[CATEGORY_COLORS[c] for c in new_budgets]))
+        else:
+            st.info("還沒有設定預算")
 
 
 # ---------- 頁面：固定支出 ----------
@@ -521,20 +661,21 @@ def page_fixed() -> None:
             name = st.text_input("名稱（例如 電話費、iCloud）")
             amount = st.number_input("每月金額", min_value=0.0, step=10.0, format="%.0f")
             if st.form_submit_button("新增", type="primary", icon=":material/add:"):
-                if not name.strip():
-                    st.error("請輸入名稱")
+                name = name.strip()  # 前後的空白不要存進去，通知訊息也用同一個值
+                if not name:
+                    st.warning("請輸入名稱")
                 elif amount <= 0:
-                    st.error("金額要大於 0")
+                    st.warning("金額要大於 0")
                 else:
-                    db.add_fixed_expense(name.strip(), amount)
-                    st.success(f"已新增：{name}")
+                    db.add_fixed_expense(name, amount)
+                    done(f"已新增：{plain(name)}")
 
     items = db.get_fixed_expenses()
     with list_col:
         total = sum(item["amount"] for item in items)
-        m1, m2 = st.columns(2)
-        m1.metric("固定支出合計 / 月", money(total), border=True)
-        m2.metric("一年下來", money(total * 12), border=True)
+        m1, m2 = summary_strip("fixed", 2)
+        m1.metric("固定支出合計 / 月", money(total))
+        m2.metric("一年下來", money(total * 12))
 
         with st.container(key="card_fixed_list"):
             card_title("項目", f"共 {len(items)} 項")
@@ -543,7 +684,7 @@ def page_fixed() -> None:
                 return
             for item in items:
                 col1, col2, col3 = st.columns([4, 2, 1], vertical_alignment="center")
-                col1.write(item["name"])
+                col1.write(plain(item["name"]))
                 col2.write(f"**{money(item['amount'])}**")
                 with col3:
                     if delete_button(f"del_fixed_{item['id']}"):
@@ -558,10 +699,10 @@ def page_debts() -> None:
 
     debts = db.get_debts()
     cash = db.get_settings()["cash_on_hand"]
-    m1, m2, m3 = st.columns(3)
-    m1.metric("負債餘額", money(sum(d["remaining"] for d in debts)), border=True)
-    m2.metric("每月還款", money(total_debt_payment(debts)), border=True)
-    m3.metric("手上現金", money(cash), help="按「已還一期」會從這裡扣", border=True)
+    m1, m2, m3 = summary_strip("debts", 3)
+    m1.metric("負債餘額", money(sum(d["remaining"] for d in debts)))
+    m2.metric("每月還款", money(total_debt_payment(debts)))
+    m3.metric("手上現金", money(cash), help="按「已還一期」會從這裡扣")
 
     list_col, form_col = st.columns([3, 2])
 
@@ -572,18 +713,18 @@ def page_debts() -> None:
             remaining = st.number_input("剩餘金額", min_value=0.0, step=1000.0, format="%.0f")
             monthly = st.number_input("每月還款", min_value=0.0, step=100.0, format="%.0f")
             if st.form_submit_button("新增", type="primary", icon=":material/add:"):
-                if not name.strip():
-                    st.error("請輸入名稱")
+                name = name.strip()
+                if not name:
+                    st.warning("請輸入名稱")
                 elif remaining <= 0 or monthly <= 0:
-                    st.error("剩餘金額和每月還款都要大於 0")
+                    st.warning("剩餘金額和每月還款都要大於 0")
                 else:
-                    db.add_debt(name.strip(), remaining, monthly)
-                    st.success(f"已新增：{name}")
-                    st.rerun()  # 讓左邊的清單和上面的數字卡馬上更新
+                    db.add_debt(name, remaining, monthly)
+                    done(f"已新增：{plain(name)}")  # 重跑讓左邊的清單和上面的數字馬上更新
 
     with list_col:
         if not debts:
-            st.info("沒有負債 🎉")
+            st.info("沒有負債")
             return
 
         today = date.today()
@@ -591,7 +732,7 @@ def page_debts() -> None:
             with st.container(key=f"card_debt_{d['id']}"):
                 ym = payoff_month(d["remaining"], d["monthly_payment"], today)
                 if ym is None:
-                    status = chip("已還清", GOLD)
+                    status = chip("已還清", GOLD_TEXT)
                 else:
                     n = months_left(d["remaining"], d["monthly_payment"])
                     status = chip(f"還剩 {n} 期・預計 {ym[0]} 年 {ym[1]} 月還清", INK)
@@ -609,9 +750,10 @@ def page_debts() -> None:
                                  type="primary", icon=":material/check:"):
                         try:
                             db.pay_debt_installment(d["id"])
-                            st.rerun()
-                        except ValueError as e:  # 現金不夠時，db 會丟出 ValueError
-                            st.error(str(e))
+                        except ValueError as e:  # 現金不夠時，db 會丟出 ValueError，兩邊都不扣
+                            st.warning(str(e))
+                        else:  # 沒有出錯才會走到這裡（try 的 else）
+                            done(f"已還一期 {money(pay)}，手上現金也扣掉了")
                 with b2:
                     if delete_button(f"del_debt_{d['id']}"):
                         db.delete_debt(d["id"])
@@ -630,13 +772,13 @@ def page_stocks() -> None:
         total_value = sum(m["value"] for m in analyzed)
         total_profit = sum(m["profit"] for m in analyzed)
         cost = total_value - total_profit
-        m1, m2, m3 = st.columns(3)
-        m1.metric("總市值", money(total_value), border=True)
+        m1, m2, m3 = summary_strip("stocks", 3)
+        m1.metric("總市值", money(total_value))
         # delta_color="inverse"：正數紅、負數綠（台股習慣）
         m2.metric("總損益", signed_money(total_profit),
                   delta=f"{total_profit / cost:+.2%}" if cost > 0 else None,
-                  delta_color="inverse", border=True)
-        m3.metric("持有檔數", f"{len(analyzed)} 檔", border=True)
+                  delta_color="inverse")
+        m3.metric("持有檔數", f"{len(analyzed)} 檔")
 
         with st.container(key="card_holdings"):
             card_title("持股總覽", "同代號已合併")
@@ -667,8 +809,10 @@ def page_stocks() -> None:
                 })
             )
             st.dataframe(styled, hide_index=True)
-            for m in over_concentrated(analyzed):
-                st.warning(f"{m['name']} 占 {m['weight']:.1%}，超過 {CONCENTRATION_LIMIT:.0%}", icon="⚠️")
+            over = over_concentrated(analyzed)
+            if over:
+                notices([("集中", f"{html.escape(m['name'])} 占 {m['weight']:.1%}，"
+                                  f"超過 {CONCENTRATION_LIMIT:.0%}。", WARN) for m in over])
 
     chart_col, side_col = st.columns([3, 2])
     if analyzed:
@@ -690,15 +834,14 @@ def page_stocks() -> None:
             avg_price = col5.number_input("均價", min_value=0.0, step=0.1)
             price = col6.number_input("現價", min_value=0.0, step=0.1)
             if st.form_submit_button("新增", type="primary", icon=":material/add:"):
-                if not (name.strip() and symbol.strip() and account.strip()):
-                    st.error("名稱、代號、帳戶都要填")
+                name, symbol, account = name.strip(), symbol.strip(), account.strip()
+                if not (name and symbol and account):
+                    st.warning("名稱、代號、帳戶都要填")
                 elif shares <= 0 or avg_price <= 0 or price <= 0:
-                    st.error("股數、均價、現價都要大於 0")
+                    st.warning("股數、均價、現價都要大於 0")
                 else:
-                    db.add_holding(name.strip(), symbol.strip(), account.strip(),
-                                   shares, avg_price, price)
-                    st.success(f"已新增：{name} {account}")
-                    st.rerun()  # 讓上面的總覽表馬上更新
+                    db.add_holding(name, symbol, account, shares, avg_price, price)
+                    done(f"已新增：{plain(name)}（{plain(account)}）")  # 重跑讓上面的總覽表馬上更新
 
     if not holdings:
         st.info("還沒有持股")
@@ -714,10 +857,10 @@ def page_stocks() -> None:
             new_price = st.number_input("新的現價", min_value=0.0, step=0.1)
             if st.form_submit_button("更新", type="primary", icon=":material/sync:"):
                 if new_price <= 0:
-                    st.error("現價要大於 0")
+                    st.warning("現價要大於 0")
                 else:
                     db.update_price(sym, new_price)
-                    st.rerun()
+                    done(f"已更新 {plain(sym)} 的現價")
 
     # --- 各帳戶明細（可刪除）---
     with st.container(key="card_holding_list"):
@@ -727,8 +870,8 @@ def page_stocks() -> None:
             col.caption(text)
         for h in holdings:
             col1, col2, col3, col4 = st.columns(widths, vertical_alignment="center")
-            col1.write(f"**{h['name']}**（{h['symbol']}）")
-            col2.write(h["account"])
+            col1.write(f"**{plain(h['name'])}**（{plain(h['symbol'])}）")
+            col2.write(plain(h["account"]))
             col3.write(f"{h['shares']:,.0f} 股 @ {h['avg_price']:,.2f}")
             with col4:
                 if delete_button(f"del_hold_{h['id']}"):
@@ -743,8 +886,9 @@ def page_precheck() -> None:
     settings = db.get_settings()
     cash = settings["cash_on_hand"]
 
-    # 先排好上排三張數字卡的位置，等下面算出金額再填進去
-    m1, m2, m3 = st.columns(3)
+    # 結論要放在最上面，但得等下面的股價、股數、勾選都讀到才算得出來。
+    # st.empty() 先佔一個位置，算完再把內容填進去（有點像 C++ 先宣告變數、晚一點才賦值）
+    verdict_slot = st.empty()
     left, right = st.columns([3, 2])
 
     with left, st.container(key="card_precheck_form"):
@@ -760,16 +904,28 @@ def page_precheck() -> None:
 
     ok, reasons = check_order(amount, cash, checked)
 
-    m1.metric("這筆要花", money(amount), border=True)
-    m2.metric("手上現金", money(cash), border=True)
-    m3.metric("買完還剩", money(cash - amount), border=True)
+    # 結論：可以下單用墨藍、先不要下單用橘色（紅綠留給漲跌）
+    if ok:
+        word, tone = "可以下單", INK
+        body = "<p>五項都誠實打勾了，金額也沒有超過手上現金。</p>"
+    else:
+        word, tone = "先不要下單", WARN
+        body = "<ul>" + "".join(f"<li>{html.escape(r)}</li>" for r in reasons) + "</ul>"
+    verdict_slot.markdown(
+        f'<div class="verdict"><div class="verdict-word" style="--tone:{tone}">{word}</div>'
+        f'<div>{body}</div></div>',
+        unsafe_allow_html=True,
+    )
 
     with right:
-        if ok:
-            st.success("**可以下單**", icon="✅")
-        else:
-            # 用 markdown 的清單列出所有原因
-            st.error("**先不要下單**\n\n" + "\n".join(f"- {r}" for r in reasons), icon="⛔")
+        with st.container(key="card_precheck_sum"):
+            card_title("買完還剩多少")
+            after = cash - amount
+            # 現金不夠時，剩下的錢用橘色標出來
+            after_text = money(after) if after >= 0 else f'<span style="color:{WARN}">{money(after)}</span>'
+            ledger([("", "手上現金", money(cash)),
+                    ("", "− 這筆要花", money(amount)),
+                    ("", "= 買完還剩", after_text)])
 
         # 參考資訊：幫你確認打勾的內容是不是真的
         with st.container(key="card_precheck_ref"):
@@ -778,7 +934,7 @@ def page_precheck() -> None:
             status = chip("還沒存滿", WARN) if fund < target else chip("已存滿", INK)
             st.markdown(f"緊急預備金 {money(fund)} / {money(target)}　{status}",
                         unsafe_allow_html=True)
-            losing = [f"{m['name']}（{m['symbol']}）"
+            losing = [f"{plain(m['name'])}（{plain(m['symbol'])}）"
                       for m in analyze(db.get_holdings()) if m["profit"] < 0]
             st.markdown("虧損中的個股：" + ("、".join(losing) if losing else "沒有"))
 
@@ -790,12 +946,12 @@ def page_trades() -> None:
 
     trades = db.get_trades()
     today = date.today()
-    m1, m2, m3 = st.columns(3)
+    m1, m2, m3 = summary_strip("trades", 3)
     pnl_sum = total_pnl(trades)
-    m1.metric("累計損益", signed_money(pnl_sum), border=True)
-    m2.metric("交易筆數", f"{len(trades)} 筆", border=True)
+    m1.metric("累計損益", signed_money(pnl_sum))
+    m2.metric("交易筆數", f"{len(trades)} 筆")
     m3.metric("本月當沖", f"{count_day_trades(trades, today.year, today.month)} 次",
-              help="當沖次數越少越好", border=True)
+              help="當沖次數越少越好")
 
     with st.expander("新增交易紀錄", icon=":material/add:", expanded=not trades):
         with st.form("add_trade", clear_on_submit=True, border=False):
@@ -807,11 +963,10 @@ def page_trades() -> None:
             note = st.text_input("備註（可不填）")
             if st.form_submit_button("新增", type="primary", icon=":material/add:"):
                 if not symbol.strip():
-                    st.error("請輸入標的")
+                    st.warning("請輸入標的")
                 else:
                     db.add_trade(trade_date.isoformat(), symbol.strip(), trade_type, pnl, note)
-                    st.success("已新增交易紀錄")
-                    st.rerun()
+                    done("已新增交易紀錄")
 
     if not trades:
         st.info("還沒有交易紀錄")
@@ -823,15 +978,15 @@ def page_trades() -> None:
         for col, text in zip(st.columns(widths), ["日期", "標的", "類型", "損益", "備註", ""]):
             col.caption(text)
         # 類型標籤的顏色：當沖用橘色提醒自己，其他用墨藍和灰
-        type_colors = {"當沖": WARN, "買進": INK, "賣出": "#6B7280"}
+        type_colors = {"當沖": WARN, "買進": INK, "賣出": MUTED}
         for t in trades:
             col1, col2, col3, col4, col5, col6 = st.columns(widths, vertical_alignment="center")
             col1.write(t["date"])
-            col2.write(t["symbol"])
+            col2.write(plain(t["symbol"]))
             col3.markdown(chip(t["type"], type_colors.get(t["type"], MUTED)),
                           unsafe_allow_html=True)
             col4.markdown(colored_money(t["pnl"]))
-            col5.write(t["note"] or "")
+            col5.write(plain(t["note"] or ""))
             with col6:
                 if delete_button(f"del_trade_{t['id']}"):
                     db.delete_trade(t["id"])
@@ -843,8 +998,8 @@ def page_trades() -> None:
 def page_dca() -> None:
     page_header("定期定額試算", "每個月固定投入，時間拉長後會變多少？")
 
-    # 先排好上排三張數字卡的位置，等算出結果再填進去
-    c1, c2, c3 = st.columns(3)
+    # 先排好上面摘要列的三個格子，等算出結果再填進去
+    c1, c2, c3 = summary_strip("dca", 3)
     input_col, result_col = st.columns([1, 2.4])
 
     with input_col, st.container(key="card_dca_input"):
@@ -859,15 +1014,17 @@ def page_dca() -> None:
     final = values[-1]
     invested = initial + monthly * 12 * years  # 自己總共投入的本金
 
-    c1.metric("最後總額", money(final), border=True)
+    c1.metric("最後總額", money(final))
     c2.metric("投入本金", money(invested),
               delta=f"賺 {money(final - invested)}" if final > invested else None,
-              delta_color="inverse", border=True)
-    c3.metric("4% 法則每月可領", money(monthly_withdrawal(final)), border=True)
+              delta_color="inverse")
+    c3.metric("4% 法則每月可領", money(monthly_withdrawal(final)))
 
     with result_col:
         with st.container(key="card_dca_chart"):
-            card_title("資產成長", "金色是複利多出來的部分")
+            # 年報酬率是負的時候，資產會比本金少，副標題要跟著改
+            card_title("資產成長", "金色是複利多出來的部分" if final >= invested
+                       else "金色線是資產，比藍色的本金低代表虧損")
             # 每一年的「資產」和「本金」放在同一張表，畫成兩層
             chart_data = pd.DataFrame({
                 "第幾年": range(len(values)),
@@ -885,7 +1042,9 @@ def page_dca() -> None:
             principal_area = alt.Chart(chart_data).mark_area(
                 color=INK, opacity=0.85
             ).encode(x=x, y="本金:Q")
-            show_chart((total_area + principal_area).properties(height=320))
+            # 資產的線再畫一次、放在最上層：虧損時資產比本金低，不然會被本金的面積蓋住
+            asset_line = alt.Chart(chart_data).mark_line(color=GOLD, strokeWidth=2.5).encode(x=x, y="資產:Q")
+            show_chart((total_area + principal_area + asset_line).properties(height=320))
             st.caption("假設每月月底投入、年報酬率固定不變。實際報酬每年都會波動，這只是估算。")
 
 
@@ -916,15 +1075,15 @@ def page_settings() -> None:
                     "emergency_fund": fund,
                     "emergency_target": target,
                 })
-                st.success("設定已儲存")
+                done("設定已儲存")
 
     with side_col:
         # 預備金進度
         if target > 0:
             with st.container(key="card_emergency"):
                 card_title("緊急預備金進度")
-                note = "已存滿 🎉" if fund >= target else f"還差 {money(target - fund)}・已存 {fund / target:.0%}"
-                progress_bar("🛟 預備金", fund, target, INK, note)
+                note = "已存滿" if fund >= target else f"還差 {money(target - fund)}・已存 {fund / target:.0%}"
+                progress_bar("預備金", fund, target, INK, note)
 
         # --- 匯出備份 ---
         with st.container(key="card_backup"):
@@ -1000,7 +1159,7 @@ for group, items in NAV:
 current = st.navigation(pages, position="hidden")
 
 with st.sidebar:
-    st.markdown('<div class="brand">💰 個人理財</div>'
+    st.markdown('<div class="brand">個人理財</div>'
                 '<div class="brand-sub">本機執行・資料只存在你的電腦</div>',
                 unsafe_allow_html=True)
     for group, group_pages in pages.items():
@@ -1008,5 +1167,9 @@ with st.sidebar:
         for p in group_pages:
             st.page_link(p, width="stretch")
 sidebar_summary()
+
+# 上一次存檔留下的通知（見 done()），顯示一次就拿掉
+if "toast" in st.session_state:
+    st.toast(st.session_state.pop("toast"), icon=":material/check_circle:")
 
 current.run()  # 執行被選中的頁面函式

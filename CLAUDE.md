@@ -52,7 +52,7 @@ FINANCE_DB=data/example.db streamlit run app.py
 
 ### 各檔案職責
 
-- `app.py`（約 1000 行）：由上到下是「配色與 CSS（`inject_css`）→ 共用小工具（`money`、`ledger`、`budget_bar`、`donut`…）→ 各頁 `page_*()` 函式 → 側邊欄 → 主程式（`NAV` 清單 + `st.navigation`）」。新增頁面：寫一個 `page_xxx()`，再加進檔尾的 `NAV`。
+- `app.py`（約 1100 行）：由上到下是「配色與 CSS（`inject_css`）→ 共用小工具（`money`、`ledger`、`summary_strip`、`notices`、`plain`、`done`、`budget_bar`、`donut`…）→ 各頁 `page_*()` 函式 → 側邊欄 → 主程式（`NAV` 清單 + `st.navigation`）」。新增頁面：寫一個 `page_xxx()`，再加進檔尾的 `NAV`。外觀是「存摺」風格：一排數字用 `summary_strip()`、自律提醒用 `notices()`、明細用 `ledger()`。
 - `db.py`：`DB_PATH` 預設是 `data/finance.db`；exe 版（`sys.frozen`）是 `~/FinanceApp/finance.db`；環境變數 `FINANCE_DB` 可覆蓋。`init_db()` 用 `CREATE TABLE IF NOT EXISTS` 建 7 張表：`settings`（key/value）、`budgets`、`expenses`、`fixed_expenses`、`debts`、`holdings`、`trades`。
 - `models/budget.py`：預算類別 `CATEGORIES`（唯一定義處）、篩選某月、本月還能花多少。
 - `models/cashflow.py`：每月可存 = 收入 − 固定支出 − 負債還款 − 生活預算。
@@ -72,7 +72,10 @@ FINANCE_DB=data/example.db streamlit run app.py
 - 小數比較用 `pytest.approx()`。
 - **金額顯示用 `12,345 元`，不要用 `$12,345`**：Streamlit markdown 會把同一行兩個 `$` 中間當成 LaTeX 公式。用 `app.py` 的 `money()` / `signed_money()`。
 - **顏色是台股習慣：紅色 = 賺、綠色 = 賠**。紅綠只留給漲跌；預算快用完用金色、超支用橘色。
-- 使用者輸入的文字放進 `unsafe_allow_html=True` 的 HTML 前，一定要 `html.escape()`。
+- 使用者輸入的文字放進 `unsafe_allow_html=True` 的 HTML 前，一定要 `html.escape()`；放進 `st.write` / `st.markdown` / `st.toast` 前要用 `plain()`（不然兩個 `$` 中間會變成數學公式）。
+- 存檔成功一律呼叫 `done("訊息")`：會顯示通知並立刻重跑。不重跑的話，側邊欄會顯示舊數字，而且連按兩次「儲存」第二次會沒存到。
+- 不要用 `st.success` / `st.error`（綠、紅色會和漲跌搞混）：輸入錯誤用 `st.warning`，自律提醒用 `notices()`。
+- 顏色常數都算過對比（小字至少 4.5:1）。要當小字用的顏色用 `GAIN`、`LOSS`、`WARN`、`GOLD_TEXT`；`GOLD` 只用在進度條和圖表。`config.toml` 的 `redColor` / `greenColor` 要寫比較亮的原色，Streamlit 當文字用時會自己再調深。
 - Streamlit 每次互動都會**從頭重跑整個 `app.py`**；資料要存資料庫，改完資料後呼叫 `st.rerun()`。
 - `requirements-build.txt` 要保持**純 ASCII**（Windows 的 pip 用 cp950 讀，有中文會失敗）。
 - `.streamlit/config.toml` 由 `FinanceApp.spec` 打包到 exe 裡 `app.py` 旁邊的 `.streamlit/`（Streamlit 會讀「主程式旁邊」的設定檔），所以 exe 版也有主題；改完要重新打包才會生效。`run_app.py` 的命令列參數優先權比 config.toml 高，兩邊不要設成不一樣的值。
@@ -92,6 +95,7 @@ FINANCE_DB=data/example.db streamlit run app.py
 - ✅ 介面美化（主題、數字卡、圖表、側邊欄、手機版面）
 - ✅ exe 版套用主題
 - ✅ MIT 授權、README 下載說明
+- ✅ 介面改版：存摺風格，並修正全面測試找到的問題（2026-10-13）
 
 下一步建議的待辦（完整清單和理由見 `docs/開發紀錄.md` 的「待辦」）：
 1. ETF 賣出交易稅是 0.1%（目前一律用 0.3%），手續費最低 20 元
