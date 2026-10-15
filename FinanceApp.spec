@@ -15,6 +15,8 @@ datas = [
     ("app.py", "."),
     ("db.py", "."),
     ("models", "models"),
+    # 主題配色設定。exe 啟動時 run_app.py 會切換到這個設定所在的資料夾，Streamlit 才讀得到
+    (".streamlit/config.toml", ".streamlit"),
 ]
 binaries = []
 hiddenimports = []
@@ -50,7 +52,7 @@ exe = EXE(
     # console=True：會出現一個黑色視窗。關掉它，程式就結束。
     # 如果設成 False，程式會在背景一直跑，沒有簡單的方法關掉。
     console=True,
-    icon=None,  # 之後想換圖示：放一個 icon.ico，改成 icon="icon.ico"
+    icon="installer/icon.ico",  # exe 和捷徑上顯示的圖示（安裝程式也用同一個）
 )
 
 # onedir 模式：輸出一個資料夾，啟動比單一 exe 快很多（不用每次解壓 100 多 MB）

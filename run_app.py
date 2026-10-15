@@ -27,6 +27,12 @@ def main() -> None:
     # 放在函式裡才 import：如果連 Streamlit 都載入失敗，也能被下面的 try 抓到並顯示原因
     from streamlit.web import cli as stcli
 
+    # Streamlit 會讀「目前資料夾」底下的 .streamlit/config.toml（主題配色）。
+    # 從桌面捷徑或開始選單啟動時，目前資料夾不一定是程式所在的地方，
+    # 所以先切換到打包好的檔案所在的資料夾，exe 版才會有和開發時一樣的配色。
+    # （資料庫路徑是用絕對路徑算的，見 db.py，不受這行影響）
+    os.chdir(resource_path("."))
+
     sys.argv = [
         "streamlit",
         "run",
@@ -40,6 +46,20 @@ def main() -> None:
         "--browser.gatherUsageStats=false",     # 不傳送使用統計給 Streamlit
         "--client.toolbarMode=minimal",         # 隱藏右上角的 Deploy 等開發者按鈕
     ]
+
+    # 新版 Streamlit 偵測到電腦上有 AI 寫程式工具時，會在畫面右上角跳出
+    # 「Help agents write better apps」的開發者提示，一般使用者用不到。
+    # 這個設定可以關掉它，但舊版 Streamlit 沒有這個設定（給它不認識的參數會無法啟動），
+    # 所以先查 Streamlit 的「設定項目清單」裡有沒有，有才加。
+    # （不用 get_option() 查，因為它會提早讀設定檔，黑色視窗會多一行「請重新啟動」的警告）
+    from streamlit import config as st_config
+    if "logger.hideWelcomeMessage" in getattr(st_config, "_config_options_template", {}):
+        sys.argv.append("--logger.hideWelcomeMessage=true")
+        # 這個設定也會藏掉黑色視窗裡的網址，所以自己印一份（用英文，避免編碼問題）
+        print("FinanceApp is starting. Your browser will open in a moment.")
+        print("If it does not, open http://localhost:8501 in your browser.")
+        print("Close this window to quit FinanceApp.", flush=True)
+
     sys.exit(stcli.main())
 
 

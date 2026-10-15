@@ -1,0 +1,98 @@
+# 用 GitHub 的 Windows 雲端機器自動打包安裝程式
+#
+# 什麼時候會跑：
+# - PR 有改到打包相關的檔案時（確認打包沒有壞掉）
+# - 推送 v 開頭的標籤時（例如 v1.0.0，用標籤的數字當版本號）
+# - 在 GitHub 網頁的 Actions 分頁手動按「Run workflow」
+#
+# 跑完後，在那次執行的頁面最下面「Artifacts」可以下載 FinanceApp-Setup 安裝檔。
+# 這台雲端機器是全新的，裡面沒有任何個人資料，所以打包出來的安裝檔也不會有。
+
+name: 打包 Windows 安裝程式
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "run_app.py"
+      - "FinanceApp.spec"
+      - "installer/**"
+      - "requirements*.txt"
+      - ".streamlit/config.toml"
+      - ".github/workflows/build-windows.yml"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安裝套件
+        run: python -m pip install -r requirements-build.txt
+
+      - name: 跑測試
+        run: python -m pytest -q
+
+      - name: PyInstaller 打包 exe
+        run: pyinstaller --noconfirm FinanceApp.spec
+
+      - name: 安裝最新版 Inno Setup
+        # 雲端機器內建的版本可能比較舊，中文語言檔需要 6.5 以上
+        run: choco install innosetup -y --no-progress
+
+      - name: 決定版本號
+        id: version
+        run: |
+          # 標籤 v1.2.3 → 1.2.3；其他情況用 0.0.執行次數，方便分辨是哪一次打包
+          if ("${{ github.ref_type }}" -eq "tag") { $v = "${{ github.ref_name }}".TrimStart("v") }
+          else { $v = "0.0.${{ github.run_number }}" }
+          "value=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Inno Setup 打包安裝程式
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=${{ steps.version.outputs.value }}" installer\FinanceApp.iss
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: 實際安裝並啟動，確認程式打得開
+        run: |
+          $setup = Get-ChildItem dist\installer\FinanceApp-Setup-*.exe | Select-Object -First 1
+          # /VERYSILENT：不顯示安裝精靈，直接用預設選項安裝
+          Start-Process $setup.FullName -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait
+          $exe = "$env:LOCALAPPDATA\Programs\FinanceApp\FinanceApp.exe"
+          if (-not (Test-Path $exe)) { Write-Error "安裝後找不到 $exe"; exit 1 }
+
+          # 啟動程式，最多等 90 秒，看 Streamlit 的健康檢查網址有沒有回應
+          $proc = Start-Process $exe -PassThru
+          $ok = $false
+          for ($i = 0; $i -lt 90; $i++) {
+            Start-Sleep -Seconds 1
+            try {
+              $r = Invoke-WebRequest "http://localhost:8501/_stcore/health" -UseBasicParsing -TimeoutSec 2
+              if ($r.Content -eq "ok") { $ok = $true; break }
+            } catch {}
+          }
+          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          if (-not $ok) {
+            $log = "$env:USERPROFILE\FinanceApp\error.log"
+            if (Test-Path $log) { Get-Content $log }
+            Write-Error "程式啟動後 90 秒內沒有回應"
+            exit 1
+          }
+          Write-Host "安裝後的程式可以正常啟動"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FinanceApp-Setup-${{ steps.version.outputs.value }}
+          path: dist/installer/*.exe
+          retention-days: 30
