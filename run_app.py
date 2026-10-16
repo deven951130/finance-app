@@ -1,35 +1,57 @@
 """
-exe 的啟動入口。
+exe 的啟動入口：把理財系統開在「自己的視窗」裡，像一般 Windows 軟體。
 
-平常開發時我們在終端機輸入 streamlit run app.py。
-打包成 exe 之後沒有終端機可以打指令，所以用這個檔案「代替我們輸入那行指令」：
-它把參數塞進 sys.argv，再呼叫 Streamlit 自己的命令列程式。
+平常開發時我們在終端機輸入 streamlit run app.py，再用瀏覽器看畫面。
+打包成軟體後，我們希望點兩下就跳出一個視窗，不要黑色視窗、也不要開瀏覽器。
 
-開發時也可以直接執行：python run_app.py
+做法分成兩個部分（類比 C++：一個程式啟動兩個 process）：
+1. 「伺服器」：在背景執行 Streamlit，負責算資料、產生畫面。
+   用同一個 exe 再啟動一次自己，加上 --server 參數，就會走這條路。
+2. 「視窗」：用 pywebview 開一個視窗。它內建 Windows 的 Edge 網頁元件（WebView2，
+   Windows 10/11 都已經有），把伺服器產生的畫面顯示在視窗裡。
+關掉視窗時，程式會順便把背景的伺服器關掉。
+
+開發時也可以直接執行：python run_app.py（需要先 pip install pywebview）
 """
 
 import os
+import socket
+import subprocess
 import sys
+import threading
+import time
 import traceback
+import urllib.request
+
+APP_TITLE = "個人理財管理系統"
+
+# 資料、錯誤紀錄都放在這個資料夾（和 db.py 的資料庫位置相同）
+LOG_DIR = os.path.join(os.path.expanduser("~"), "FinanceApp")
+SERVER_LOG = os.path.join(LOG_DIR, "server.log")
 
 
 def resource_path(relative: str) -> str:
     """找到打包進 exe 的檔案。
 
-    exe 啟動時，PyInstaller 會把程式檔解壓到一個暫存資料夾，路徑放在 sys._MEIPASS。
+    exe 啟動時，PyInstaller 會把程式檔放在 sys._MEIPASS 這個資料夾。
     沒有打包（直接用 python 執行）時，就用這個檔案所在的資料夾。
     """
     base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base, relative)
 
 
-def main() -> None:
-    # 放在函式裡才 import：如果連 Streamlit 都載入失敗，也能被下面的 try 抓到並顯示原因
+# ---------------------------------------------------------------------------
+# 第 1 部分：伺服器（在背景跑 Streamlit）
+# ---------------------------------------------------------------------------
+
+def run_server(port: int) -> None:
+    """代替我們輸入 streamlit run app.py。這個函式在背景的那個 process 裡執行。"""
+    # 放在函式裡才 import：視窗那邊用不到 Streamlit，啟動比較快
+    from streamlit import config as st_config
     from streamlit.web import cli as stcli
 
-    # Streamlit 會讀「目前資料夾」底下的 .streamlit/config.toml（主題配色）。
-    # 從桌面捷徑或開始選單啟動時，目前資料夾不一定是程式所在的地方，
-    # 所以先切換到打包好的檔案所在的資料夾，exe 版才會有和開發時一樣的配色。
+    # Streamlit 會讀「目前資料夾」底下的 .streamlit/config.toml（主題配色），
+    # 所以先切換到打包好的檔案所在的資料夾。
     # （資料庫路徑是用絕對路徑算的，見 db.py，不受這行影響）
     os.chdir(resource_path("."))
 
@@ -39,8 +61,8 @@ def main() -> None:
         resource_path("app.py"),
         # 以下都是 Streamlit 的設定，等同寫在 .streamlit/config.toml 裡
         "--global.developmentMode=false",       # exe 裡一定要關掉開發模式
-        "--server.headless=false",              # 啟動後自動打開瀏覽器
-        "--server.showEmailPrompt=false",       # 不要在黑色視窗問你的 email
+        "--server.headless=true",               # 不要自己開瀏覽器，畫面由我們的視窗顯示
+        f"--server.port={port}",
         "--server.address=localhost",           # 只有自己這台電腦連得到，區網其他人連不到
         "--server.fileWatcherType=none",        # exe 裡的程式不會改，不需要監看檔案
         "--browser.gatherUsageStats=false",     # 不傳送使用統計給 Streamlit
@@ -48,51 +70,185 @@ def main() -> None:
     ]
 
     # 新版 Streamlit 偵測到電腦上有 AI 寫程式工具時，會在畫面右上角跳出
-    # 「Help agents write better apps」的開發者提示，一般使用者用不到。
-    # 這個設定可以關掉它，但舊版 Streamlit 沒有這個設定（給它不認識的參數會無法啟動），
-    # 所以先查 Streamlit 的「設定項目清單」裡有沒有，有才加。
-    # （不用 get_option() 查，因為它會提早讀設定檔，黑色視窗會多一行「請重新啟動」的警告）
-    from streamlit import config as st_config
+    # 「Help agents write better apps」的開發者提示。這個設定可以關掉它，
+    # 但舊版 Streamlit 沒有這個設定（給它不認識的參數會無法啟動），所以先查有沒有。
     if "logger.hideWelcomeMessage" in getattr(st_config, "_config_options_template", {}):
         sys.argv.append("--logger.hideWelcomeMessage=true")
-        # 這個設定也會藏掉黑色視窗裡的網址，所以自己印一份（用英文，避免編碼問題）
-        print("FinanceApp is starting. Your browser will open in a moment.")
-        print("If it does not, open http://localhost:8501 in your browser.")
-        print("Close this window to quit FinanceApp.", flush=True)
+
+    # 保險：如果視窗那邊意外當掉（沒機會叫我們結束），伺服器也要自己結束，
+    # 不然會一直留在背景。做法：視窗那邊和我們之間接了一條管線（stdin），
+    # 視窗的 process 一結束，管線就會斷，read() 會立刻回傳，我們就跟著結束。
+    def exit_when_window_closes() -> None:
+        sys.stdin.read()
+        os._exit(0)
+
+    threading.Thread(target=exit_when_window_closes, daemon=True).start()
 
     sys.exit(stcli.main())
 
 
-def show_error_and_wait(message: str) -> None:
-    """程式出錯時，把錯誤印出來並存成檔案，然後停住，不讓黑色視窗直接關掉。"""
-    log_dir = os.path.join(os.path.expanduser("~"), "FinanceApp")
-    log_path = os.path.join(log_dir, "error.log")
+def find_free_port() -> int:
+    """找一個目前沒人用的連接埠，避免和其他程式（或另一個開著的理財系統）撞到。
+
+    測試時可以用環境變數 FINANCE_APP_PORT 指定固定的連接埠。
+    """
+    if os.environ.get("FINANCE_APP_PORT"):
+        return int(os.environ["FINANCE_APP_PORT"])
+    # 連接埠填 0，作業系統會自動挑一個空的給我們
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def start_server(port: int) -> subprocess.Popen:
+    """用同一個程式再啟動一次自己，加上 --server，讓它在背景當伺服器。"""
+    if getattr(sys, "frozen", False):
+        # 打包後：sys.executable 就是 FinanceApp.exe 自己
+        command = [sys.executable, "--server", str(port)]
+    else:
+        # 開發時：sys.executable 是 python，要告訴它跑哪個檔案
+        command = [sys.executable, os.path.abspath(__file__), "--server", str(port)]
+
+    os.makedirs(LOG_DIR, exist_ok=True)
+    # 伺服器的訊息寫到 server.log，出問題時可以打開來看
+    log_file = open(SERVER_LOG, "w", encoding="utf-8")
+    # CREATE_NO_WINDOW：Windows 上不要替背景程式開黑色視窗（其他系統沒有這個設定，用 0）
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    # stdin=PIPE：接一條管線給伺服器，視窗這邊結束時管線會斷，伺服器就知道要結束（見 run_server）
+    return subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        creationflags=flags,
+    )
+
+
+def wait_until_ready(port: int, server: subprocess.Popen, timeout: float = 90) -> None:
+    """一直問伺服器「好了沒」，直到它回答 ok。
+
+    Streamlit 內建一個健康檢查網址 /_stcore/health，準備好時會回應 ok。
+    如果伺服器中途結束（出錯），或等太久，就丟出錯誤。
+    """
+    url = f"http://localhost:{port}/_stcore/health"
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if server.poll() is not None:
+            raise RuntimeError(f"背景伺服器意外結束（代碼 {server.returncode}）")
+        try:
+            with urllib.request.urlopen(url, timeout=2) as response:
+                if response.read().strip() == b"ok":
+                    return
+        except OSError:
+            pass  # 還沒準備好，等一下再問
+        time.sleep(0.3)
+    raise RuntimeError(f"等了 {timeout:.0f} 秒，背景伺服器還沒準備好")
+
+
+# ---------------------------------------------------------------------------
+# 第 2 部分：視窗
+# ---------------------------------------------------------------------------
+
+# 伺服器還在啟動時，視窗先顯示這個畫面，免得使用者以為沒反應
+LOADING_HTML = """
+<html><body style="margin:0;height:100vh;display:flex;align-items:center;justify-content:center;
+background:#F6F4EF;color:#1F2633;font-family:'Microsoft JhengHei','PingFang TC',sans-serif;">
+<div style="text-align:center">
+  <div style="font-size:22px;font-weight:600;margin-bottom:8px">個人理財管理系統</div>
+  <div style="font-size:15px;color:#6B7280">正在啟動，請稍候…</div>
+</div></body></html>
+"""
+
+
+def main() -> None:
+    # 放在函式裡才 import：如果 pywebview 載入失敗，也能被下面的 try 抓到並顯示原因
+    import webview
+
+    # 允許「設定」頁的「匯出 CSV 備份」按鈕下載檔案（預設是關的）
+    webview.settings["ALLOW_DOWNLOADS"] = True
+
+    port = find_free_port()
+    server = start_server(port)
+    startup_error = []  # 背景執行緒發生的錯誤放這裡，等視窗關掉後再顯示
+
+    window = webview.create_window(
+        APP_TITLE,
+        html=LOADING_HTML,
+        width=1280,
+        height=860,
+        min_size=(420, 600),
+    )
+
+    def load_app() -> None:
+        """視窗開好之後，在背景執行緒等伺服器準備好，再把畫面換成理財系統。"""
+        try:
+            wait_until_ready(port, server)
+            window.load_url(f"http://localhost:{port}")
+        except Exception:
+            startup_error.append(traceback.format_exc())
+            window.destroy()
+
     try:
-        os.makedirs(log_dir, exist_ok=True)
+        # start() 會一直停在這裡，直到使用者關掉視窗
+        webview.start(load_app)
+    finally:
+        # 視窗關了：把背景伺服器也關掉，不留在背景佔記憶體
+        server.terminate()
+        try:
+            server.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            server.kill()
+
+    if startup_error:
+        raise RuntimeError(startup_error[0] + "\n伺服器訊息：\n" + read_server_log())
+
+
+# ---------------------------------------------------------------------------
+# 出錯時的處理
+# ---------------------------------------------------------------------------
+
+def read_server_log() -> str:
+    """讀背景伺服器的紀錄最後 40 行，附在錯誤訊息裡。"""
+    try:
+        with open(SERVER_LOG, encoding="utf-8", errors="replace") as f:
+            return "".join(f.readlines()[-40:])
+    except OSError:
+        return "(沒有伺服器紀錄)"
+
+
+def show_error(message: str) -> None:
+    """把錯誤存成 error.log，再跳出對話框告訴使用者。
+
+    視窗版沒有黑色視窗可以印訊息，所以 Windows 上用系統內建的對話框（MessageBox）。
+    """
+    log_path = os.path.join(LOG_DIR, "error.log")
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
         with open(log_path, "w", encoding="utf-8") as f:
             f.write(message)
     except OSError:
-        log_path = "(could not write log file)"
+        log_path = "(無法寫入紀錄檔)"
 
-    # 用英文，避免 Windows 黑色視窗的編碼問題
-    print()
-    print("=" * 60)
-    print("FinanceApp crashed. Error details:")
-    print("=" * 60)
-    print(message)
-    print(f"This error was also saved to: {log_path}")
-    input("Press Enter to close this window...")
+    text = (
+        "程式發生錯誤，無法開啟。\n\n"
+        f"詳細的錯誤訊息存在：\n{log_path}\n\n"
+        "可以把這個檔案的內容貼給 Claude 協助排除。\n\n"
+        + message[-1500:]  # 對話框放不下太長的內容，只顯示最後一段
+    )
+    if sys.platform == "win32":
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(None, text, APP_TITLE, 0x10)  # 0x10 = 紅色叉叉圖示
+    else:
+        print(text, file=sys.stderr)
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except SystemExit as e:
-        # 正常結束是 0（或 None）；其他代碼代表 Streamlit 啟動失敗
-        if e.code not in (0, None):
-            show_error_and_wait(f"Streamlit exited with code {e.code}")
-        raise
-    except Exception:
-        # 任何其他錯誤（按 Ctrl+C 結束不算錯誤，所以不用 BaseException）：顯示完整的錯誤訊息（traceback）
-        show_error_and_wait(traceback.format_exc())
-        raise
+    if len(sys.argv) >= 3 and sys.argv[1] == "--server":
+        # 背景伺服器：錯誤訊息會寫進 server.log，由視窗那邊負責顯示
+        run_server(int(sys.argv[2]))
+    else:
+        try:
+            main()
+        except Exception:
+            show_error(traceback.format_exc())
+            sys.exit(1)

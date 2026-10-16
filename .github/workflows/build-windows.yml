@@ -73,6 +73,8 @@ jobs:
           if (-not (Test-Path $exe)) { Write-Error "安裝後找不到 $exe"; exit 1 }
 
           # 啟動程式，最多等 90 秒，看 Streamlit 的健康檢查網址有沒有回應
+          # （平常連接埠是隨機挑的，測試時用環境變數固定成 8501，才知道要問哪裡）
+          $env:FINANCE_APP_PORT = "8501"
           $proc = Start-Process $exe -PassThru
           $ok = $false
           for ($i = 0; $i -lt 90; $i++) {
@@ -82,14 +84,29 @@ jobs:
               if ($r.Content -eq "ok") { $ok = $true; break }
             } catch {}
           }
-          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-          if (-not $ok) {
-            $log = "$env:USERPROFILE\FinanceApp\error.log"
-            if (Test-Path $log) { Get-Content $log }
-            Write-Error "程式啟動後 90 秒內沒有回應"
+          # 再等 10 秒，確認視窗沒有當掉、也沒有跳出錯誤
+          if ($ok) { Start-Sleep -Seconds 10 }
+          $errorLog = "$env:USERPROFILE\FinanceApp\error.log"
+          if (-not $ok -or $proc.HasExited -or (Test-Path $errorLog)) {
+            if (Test-Path $errorLog) { Get-Content $errorLog }
+            $serverLog = "$env:USERPROFILE\FinanceApp\server.log"
+            if (Test-Path $serverLog) { Get-Content $serverLog -Tail 40 }
+            Get-Process FinanceApp -ErrorAction SilentlyContinue | Stop-Process -Force
+            Write-Error "安裝後的程式沒有正常啟動"
             exit 1
           }
-          Write-Host "安裝後的程式可以正常啟動"
+          Write-Host "安裝後的程式可以正常啟動，視窗也開著"
+
+          # 只強制關掉視窗那個 process，確認背景伺服器會自己跟著結束，不會留在背景
+          Stop-Process -Id $proc.Id -Force
+          Start-Sleep -Seconds 8
+          $left = Get-Process FinanceApp -ErrorAction SilentlyContinue
+          if ($left) {
+            $left | Stop-Process -Force
+            Write-Error "視窗關掉後，背景伺服器還留著"
+            exit 1
+          }
+          Write-Host "視窗關掉後，背景伺服器也結束了"
 
       - uses: actions/upload-artifact@v4
         with:

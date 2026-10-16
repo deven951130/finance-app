@@ -71,7 +71,7 @@ Source: "..\dist\FinanceApp\*"; DestDir: "{app}"; Flags: ignoreversion recursesu
 
 [Icons]
 ; 開始選單
-Name: "{group}\個人理財管理系統"; Filename: "{app}\FinanceApp.exe"; Comment: "開啟後會出現黑色視窗並打開瀏覽器，關掉黑色視窗就結束程式"
+Name: "{group}\個人理財管理系統"; Filename: "{app}\FinanceApp.exe"; Comment: "記帳、預算、負債與持股管理"
 Name: "{group}\解除安裝 個人理財管理系統"; Filename: "{uninstallexe}"
 ; 桌面（只有勾選「建立桌面捷徑」時才建立）
 Name: "{autodesktop}\個人理財管理系統"; Filename: "{app}\FinanceApp.exe"; Tasks: desktopicon

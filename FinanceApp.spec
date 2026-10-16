@@ -49,9 +49,9 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name="FinanceApp",
-    # console=True：會出現一個黑色視窗。關掉它，程式就結束。
-    # 如果設成 False，程式會在背景一直跑，沒有簡單的方法關掉。
-    console=True,
+    # console=False：不要黑色視窗。畫面由 run_app.py 用 pywebview 開的視窗顯示，
+    # 關掉那個視窗，程式（包括背景的伺服器）就會結束。
+    console=False,
     icon="installer/icon.ico",  # exe 和捷徑上顯示的圖示（安裝程式也用同一個）
 )
 
