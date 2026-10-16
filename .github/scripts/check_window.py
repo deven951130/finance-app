@@ -17,7 +17,8 @@ pages = json.load(urllib.request.urlopen(f"http://127.0.0.1:{debug_port}/json"))
 page = next(p for p in pages if p.get("type") == "page")
 print("page:", page["url"], "title:", page["title"])
 
-ws = websocket.create_connection(page["webSocketDebuggerUrl"], timeout=5)
+# suppress_origin：不送 Origin 標頭，否則網頁引擎會拒絕連線（403）
+ws = websocket.create_connection(page["webSocketDebuggerUrl"], timeout=5, suppress_origin=True)
 next_id = 0
 
 
