@@ -26,6 +26,8 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    # 萬一有步驟卡住，30 分鐘後自動停止（預設要等 6 小時）
+    timeout-minutes: 30
     defaults:
       run:
         shell: pwsh
@@ -109,7 +111,7 @@ jobs:
           $errorLog = "$env:USERPROFILE\FinanceApp\error.log"
           if (-not $pageOk) {
             # 畫面沒畫好：直接跟伺服器要網頁用到的檔案，看是哪個檔案卡住
-            $html = (Invoke-WebRequest "http://127.0.0.1:8501/" -UseBasicParsing).Content
+            $html = (Invoke-WebRequest "http://127.0.0.1:8501/" -UseBasicParsing -TimeoutSec 20).Content
             [regex]::Matches($html, '(?:src|href)="([^"]+)"') | ForEach-Object {
               $u = $_.Groups[1].Value
               if ($u -notmatch '^https?:') { $u = "http://127.0.0.1:8501/" + $u.TrimStart('.', '/') }

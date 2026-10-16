@@ -47,7 +47,7 @@ def resource_path(relative: str) -> str:
 # 第 1 部分：伺服器（在背景跑 Streamlit）
 # ---------------------------------------------------------------------------
 
-def run_server(port: int) -> None:
+def run_server(port: int, window_pid: int) -> None:
     """代替我們輸入 streamlit run app.py。這個函式在背景的那個 process 裡執行。"""
     # 放在函式裡才 import：視窗那邊用不到 Streamlit，啟動比較快
     from streamlit import config as st_config
@@ -81,16 +81,31 @@ def run_server(port: int) -> None:
     if "logger.hideWelcomeMessage" in getattr(st_config, "_config_options_template", {}):
         sys.argv.append("--logger.hideWelcomeMessage=true")
 
-    # 保險：如果視窗那邊意外當掉（沒機會叫我們結束），伺服器也要自己結束，
-    # 不然會一直留在背景。做法：視窗那邊和我們之間接了一條管線（stdin），
-    # 視窗的 process 一結束，管線就會斷，read() 會立刻回傳，我們就跟著結束。
-    def exit_when_window_closes() -> None:
-        sys.stdin.read()
-        os._exit(0)
-
-    threading.Thread(target=exit_when_window_closes, daemon=True).start()
+    # 保險：如果視窗那邊意外當掉（沒機會叫我們結束），伺服器也要自己結束，不然會一直留在背景
+    threading.Thread(target=exit_when_window_closes, args=(window_pid,), daemon=True).start()
 
     sys.exit(stcli.main())
+
+
+def exit_when_window_closes(window_pid: int) -> None:
+    """等「視窗那個 process」結束，伺服器就跟著結束。在背景執行緒裡跑。
+
+    注意：以前用「讀 stdin 管線、管線斷了就結束」的寫法，但在 Windows 上，
+    一個執行緒卡在讀管線時，Streamlit 送網頁檔案（讀檔）也會跟著卡住，
+    視窗就只剩一片空白。所以改成直接問作業系統「那個 process 還在不在」，完全不碰檔案。
+    """
+    if sys.platform == "win32":
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        SYNCHRONIZE = 0x00100000  # 只要求「可以等它結束」的權限
+        handle = kernel32.OpenProcess(SYNCHRONIZE, False, window_pid)
+        if handle:
+            kernel32.WaitForSingleObject(handle, 0xFFFFFFFF)  # 一直等，直到視窗的 process 結束
+    else:
+        # macOS / Linux：父 process 結束後，我們的 getppid() 會變成別的數字
+        while os.getppid() == window_pid:
+            time.sleep(2)
+    os._exit(0)
 
 
 def find_free_port() -> int:
@@ -110,20 +125,21 @@ def start_server(port: int) -> subprocess.Popen:
     """用同一個程式再啟動一次自己，加上 --server，讓它在背景當伺服器。"""
     if getattr(sys, "frozen", False):
         # 打包後：sys.executable 就是 FinanceApp.exe 自己
-        command = [sys.executable, "--server", str(port)]
+        command = [sys.executable, "--server", str(port), str(os.getpid())]
     else:
         # 開發時：sys.executable 是 python，要告訴它跑哪個檔案
-        command = [sys.executable, os.path.abspath(__file__), "--server", str(port)]
+        command = [sys.executable, os.path.abspath(__file__), "--server", str(port), str(os.getpid())]
 
     os.makedirs(LOG_DIR, exist_ok=True)
     # 伺服器的訊息寫到 server.log，出問題時可以打開來看
     log_file = open(SERVER_LOG, "w", encoding="utf-8")
     # CREATE_NO_WINDOW：Windows 上不要替背景程式開黑色視窗（其他系統沒有這個設定，用 0）
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    # stdin=PIPE：接一條管線給伺服器，視窗這邊結束時管線會斷，伺服器就知道要結束（見 run_server）
+    # 用同一個程式再開一個 process，把自己的 process 編號傳過去，
+    # 伺服器會盯著這個編號，視窗結束它就結束（見 exit_when_window_closes）
     return subprocess.Popen(
         command,
-        stdin=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
         stdout=log_file,
         stderr=subprocess.STDOUT,
         creationflags=flags,
@@ -284,9 +300,9 @@ def show_error(message: str) -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) >= 3 and sys.argv[1] == "--server":
+    if len(sys.argv) >= 4 and sys.argv[1] == "--server":
         # 背景伺服器：錯誤訊息會寫進 server.log，由視窗那邊負責顯示
-        run_server(int(sys.argv[2]))
+        run_server(port=int(sys.argv[2]), window_pid=int(sys.argv[3]))
     else:
         try:
             main()
