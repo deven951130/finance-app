@@ -59,12 +59,21 @@ while time.time() < deadline:
             print("http", r.get("status"), r.get("url"))
     if time.time() - last_check > 2:
         last_check = time.time()
-        check_id = send("Runtime.evaluate", {"expression": "document.title", "returnByValue": True})
-    if msg.get("id") == next_id and "result" in msg and "result" in msg["result"]:
-        title = msg["result"]["result"].get("value", "")
-        if isinstance(title, str) and "理財" in title:
-            ok = True
-            break
+        # 一次問好幾個狀態：標題、載入進度、網址、畫面上有多少文字
+        expression = (
+            "JSON.stringify({title: document.title, ready: document.readyState, "
+            "href: location.href, text: document.body ? document.body.innerText.length : -1})"
+        )
+        send("Runtime.evaluate", {"expression": expression, "returnByValue": True})
+    elif "id" in msg and "result" in msg and "result" in msg["result"]:
+        value = msg["result"]["result"].get("value", "")
+        if isinstance(value, str) and value.startswith("{"):
+            print("state:", value)
+            if "理財" in json.loads(value).get("title", ""):
+                ok = True
+                break
+    elif "error" in msg:
+        print("cdp error:", msg["error"])
 
 print("rendered:", ok)
 sys.exit(0 if ok else 1)
