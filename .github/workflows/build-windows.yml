@@ -99,14 +99,11 @@ jobs:
             $bmp.Save("$PWD\dist\screenshot\window.png")
           } catch { Write-Host "截圖失敗：$_" }
 
-          # 問視窗裡的網頁引擎現在開著哪些頁面。
-          # 理財系統畫好後，頁面標題會變成「個人理財」；如果還是空白，標題不會是這個
-          $pageOk = $false
-          try {
-            $pages = Invoke-RestMethod "http://127.0.0.1:9222/json" -TimeoutSec 5
-            $pages | ForEach-Object { Write-Host "page: $($_.url)  title: $($_.title)" }
-            if ($pages | Where-Object { $_.url -like "http://127.0.0.1:8501*" -and $_.title -like "*理財*" }) { $pageOk = $true }
-          } catch { Write-Host "無法連到視窗的除錯連接埠：$_" }
+          # 連進視窗裡的網頁引擎，確認畫面真的畫好了（標題變成「個人理財」），
+          # 沒畫好的話會印出網頁的錯誤訊息
+          python -m pip install -q websocket-client
+          python .github\scripts\check_window.py 9222
+          $pageOk = ($LASTEXITCODE -eq 0)
           $appLog = "$env:USERPROFILE\FinanceApp\app.log"
           if (Test-Path $appLog) { Write-Host "--- app.log"; Get-Content $appLog }
           $errorLog = "$env:USERPROFILE\FinanceApp\error.log"
