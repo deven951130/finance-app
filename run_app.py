@@ -14,6 +14,7 @@ exe 的啟動入口：把理財系統開在「自己的視窗」裡，像一般 
 開發時也可以直接執行：python run_app.py（需要先 pip install pywebview）
 """
 
+import logging
 import os
 import socket
 import subprocess
@@ -28,6 +29,8 @@ APP_TITLE = "個人理財管理系統"
 # 資料、錯誤紀錄都放在這個資料夾（和 db.py 的資料庫位置相同）
 LOG_DIR = os.path.join(os.path.expanduser("~"), "FinanceApp")
 SERVER_LOG = os.path.join(LOG_DIR, "server.log")
+# 視窗這一端的紀錄：用了哪個網頁引擎、載入了哪個網址。畫面出問題時看這個檔案
+APP_LOG = os.path.join(LOG_DIR, "app.log")
 
 
 def resource_path(relative: str) -> str:
@@ -63,7 +66,10 @@ def run_server(port: int) -> None:
         "--global.developmentMode=false",       # exe 裡一定要關掉開發模式
         "--server.headless=true",               # 不要自己開瀏覽器，畫面由我們的視窗顯示
         f"--server.port={port}",
-        "--server.address=localhost",           # 只有自己這台電腦連得到，區網其他人連不到
+        # 只有自己這台電腦連得到，區網其他人連不到。
+        # 用 127.0.0.1 而不是 localhost：Windows 上 localhost 可能先被解析成 IPv6（::1），
+        # 伺服器和視窗如果一個用 IPv4、一個用 IPv6，就會連不上
+        "--server.address=127.0.0.1",
         "--server.fileWatcherType=none",        # exe 裡的程式不會改，不需要監看檔案
         "--browser.gatherUsageStats=false",     # 不傳送使用統計給 Streamlit
         "--client.toolbarMode=minimal",         # 隱藏右上角的 Deploy 等開發者按鈕
@@ -130,7 +136,7 @@ def wait_until_ready(port: int, server: subprocess.Popen, timeout: float = 90) -
     Streamlit 內建一個健康檢查網址 /_stcore/health，準備好時會回應 ok。
     如果伺服器中途結束（出錯），或等太久，就丟出錯誤。
     """
-    url = f"http://localhost:{port}/_stcore/health"
+    url = f"http://127.0.0.1:{port}/_stcore/health"
     deadline = time.time() + timeout
     while time.time() < deadline:
         if server.poll() is not None:
@@ -160,12 +166,36 @@ background:#F6F4EF;color:#1F2633;font-family:'Microsoft JhengHei','PingFang TC',
 """
 
 
+def current_renderer(webview_module) -> str:
+    """查 pywebview 實際用的是哪個網頁引擎。
+
+    Windows 上正常應該是 edgechromium（Edge WebView2）。
+    如果是 mshtml，代表電腦上找不到 WebView2，pywebview 退回舊的 IE 引擎，
+    而 IE 顯示不了 Streamlit 的畫面，視窗就會一片空白。
+    """
+    try:
+        return webview_module.guilib.guilib.renderer
+    except AttributeError:
+        return "unknown"
+
+
 def main() -> None:
+    os.makedirs(LOG_DIR, exist_ok=True)
+    # 把紀錄寫進 app.log（pywebview 自己的警告也會一起寫進來）
+    logging.basicConfig(
+        filename=APP_LOG, filemode="w", encoding="utf-8", level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    log = logging.getLogger("FinanceApp")
+
     # 放在函式裡才 import：如果 pywebview 載入失敗，也能被下面的 try 抓到並顯示原因
     import webview
 
     # 允許「設定」頁的「匯出 CSV 備份」按鈕下載檔案（預設是關的）
     webview.settings["ALLOW_DOWNLOADS"] = True
+    # 自動測試用：設定這個環境變數，就能從外面連進視窗檢查畫面有沒有正常顯示
+    if os.environ.get("FINANCE_APP_DEBUG_PORT"):
+        webview.settings["REMOTE_DEBUGGING_PORT"] = int(os.environ["FINANCE_APP_DEBUG_PORT"])
 
     port = find_free_port()
     server = start_server(port)
@@ -182,9 +212,20 @@ def main() -> None:
     def load_app() -> None:
         """視窗開好之後，在背景執行緒等伺服器準備好，再把畫面換成理財系統。"""
         try:
+            renderer = current_renderer(webview)
+            log.info("pywebview %s, renderer=%s", getattr(webview, "__version__", "?"), renderer)
+            if renderer == "mshtml":
+                raise RuntimeError(
+                    "這台電腦找不到 Microsoft Edge WebView2 Runtime，視窗無法顯示畫面。\n"
+                    "請到 https://developer.microsoft.com/microsoft-edge/webview2/ "
+                    "下載安裝「Evergreen Bootstrapper」，裝好後再打開一次。"
+                )
             wait_until_ready(port, server)
-            window.load_url(f"http://localhost:{port}")
+            url = f"http://127.0.0.1:{port}"
+            log.info("server ready, loading %s", url)
+            window.load_url(url)
         except Exception:
+            log.exception("startup failed")
             startup_error.append(traceback.format_exc())
             window.destroy()
 

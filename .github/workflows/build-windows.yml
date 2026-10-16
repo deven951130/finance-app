@@ -75,19 +75,42 @@ jobs:
           # 啟動程式，最多等 90 秒，看 Streamlit 的健康檢查網址有沒有回應
           # （平常連接埠是隨機挑的，測試時用環境變數固定成 8501，才知道要問哪裡）
           $env:FINANCE_APP_PORT = "8501"
+          # 打開視窗的除錯連接埠，等一下才能問視窗「現在顯示的是什麼頁面」
+          $env:FINANCE_APP_DEBUG_PORT = "9222"
           $proc = Start-Process $exe -PassThru
           $ok = $false
           for ($i = 0; $i -lt 90; $i++) {
             Start-Sleep -Seconds 1
             try {
-              $r = Invoke-WebRequest "http://localhost:8501/_stcore/health" -UseBasicParsing -TimeoutSec 2
+              $r = Invoke-WebRequest "http://127.0.0.1:8501/_stcore/health" -UseBasicParsing -TimeoutSec 2
               if ($r.Content -eq "ok") { $ok = $true; break }
             } catch {}
           }
-          # 再等 10 秒，確認視窗沒有當掉、也沒有跳出錯誤
-          if ($ok) { Start-Sleep -Seconds 10 }
+          # 再等 15 秒，確認視窗沒有當掉、也沒有跳出錯誤，畫面也有時間畫好
+          if ($ok) { Start-Sleep -Seconds 15 }
+
+          # 拍一張螢幕截圖，上傳到 Artifacts，方便看視窗實際長怎樣
+          try {
+            Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+            $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bmp = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+            [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            New-Item -ItemType Directory -Force dist\screenshot | Out-Null
+            $bmp.Save("$PWD\dist\screenshot\window.png")
+          } catch { Write-Host "截圖失敗：$_" }
+
+          # 問視窗裡的網頁引擎現在開著哪些頁面。
+          # 理財系統畫好後，頁面標題會變成「個人理財」；如果還是空白，標題不會是這個
+          $pageOk = $false
+          try {
+            $pages = Invoke-RestMethod "http://127.0.0.1:9222/json" -TimeoutSec 5
+            $pages | ForEach-Object { Write-Host "page: $($_.url)  title: $($_.title)" }
+            if ($pages | Where-Object { $_.url -like "http://127.0.0.1:8501*" -and $_.title -like "*理財*" }) { $pageOk = $true }
+          } catch { Write-Host "無法連到視窗的除錯連接埠：$_" }
+          $appLog = "$env:USERPROFILE\FinanceApp\app.log"
+          if (Test-Path $appLog) { Write-Host "--- app.log"; Get-Content $appLog }
           $errorLog = "$env:USERPROFILE\FinanceApp\error.log"
-          if (-not $ok -or $proc.HasExited -or (Test-Path $errorLog)) {
+          if (-not $ok -or -not $pageOk -or $proc.HasExited -or (Test-Path $errorLog)) {
             if (Test-Path $errorLog) { Get-Content $errorLog }
             $serverLog = "$env:USERPROFILE\FinanceApp\server.log"
             if (Test-Path $serverLog) { Get-Content $serverLog -Tail 40 }
@@ -107,6 +130,13 @@ jobs:
             exit 1
           }
           Write-Host "視窗關掉後，背景伺服器也結束了"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshot
+          path: dist/screenshot/*.png
+          if-no-files-found: ignore
 
       - uses: actions/upload-artifact@v4
         with:
