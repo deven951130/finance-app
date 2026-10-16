@@ -107,6 +107,19 @@ jobs:
           $appLog = "$env:USERPROFILE\FinanceApp\app.log"
           if (Test-Path $appLog) { Write-Host "--- app.log"; Get-Content $appLog }
           $errorLog = "$env:USERPROFILE\FinanceApp\error.log"
+          if (-not $pageOk) {
+            # 畫面沒畫好：直接跟伺服器要網頁用到的檔案，看是哪個檔案卡住
+            $html = (Invoke-WebRequest "http://127.0.0.1:8501/" -UseBasicParsing).Content
+            [regex]::Matches($html, '(?:src|href)="([^"]+)"') | ForEach-Object {
+              $u = $_.Groups[1].Value
+              if ($u -notmatch '^https?:') { $u = "http://127.0.0.1:8501/" + $u.TrimStart('.', '/') }
+              $t = [Diagnostics.Stopwatch]::StartNew()
+              try {
+                $r = Invoke-WebRequest $u -UseBasicParsing -TimeoutSec 20
+                Write-Host ("{0} {1} bytes {2} ms {3}" -f $r.StatusCode, $r.RawContentLength, $t.ElapsedMilliseconds, $u)
+              } catch { Write-Host ("FAILED after {0} ms {1}: {2}" -f $t.ElapsedMilliseconds, $u, $_) }
+            }
+          }
           if (-not $ok -or -not $pageOk -or $proc.HasExited -or (Test-Path $errorLog)) {
             if (Test-Path $errorLog) { Get-Content $errorLog }
             $serverLog = "$env:USERPROFILE\FinanceApp\server.log"

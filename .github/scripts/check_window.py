@@ -34,6 +34,7 @@ for domain in ("Runtime.enable", "Log.enable", "Network.enable"):
 send("Page.reload", {"ignoreCache": True})
 
 ok = False
+pending = {}  # 送出但還沒載完的請求：requestId -> 網址
 deadline = time.time() + 40
 last_check = 0
 while time.time() < deadline:
@@ -51,7 +52,12 @@ while time.time() < deadline:
     elif method == "Log.entryAdded":
         entry = params.get("entry", {})
         print("log:", entry.get("level"), entry.get("text"), entry.get("url", ""))
+    elif method == "Network.requestWillBeSent":
+        pending[params["requestId"]] = params["request"]["url"]
+    elif method == "Network.loadingFinished":
+        pending.pop(params.get("requestId"), None)
     elif method == "Network.loadingFailed":
+        pending.pop(params.get("requestId"), None)
         print("network failed:", params.get("errorText"), params.get("blockedReason", ""))
     elif method == "Network.responseReceived":
         r = params.get("response", {})
@@ -76,4 +82,6 @@ while time.time() < deadline:
         print("cdp error:", msg["error"])
 
 print("rendered:", ok)
+for url in pending.values():
+    print("still loading:", url)
 sys.exit(0 if ok else 1)
