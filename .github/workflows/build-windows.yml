@@ -16,6 +16,10 @@ on:
     tags: ["v*"]
   pull_request:
     paths:
+      # 程式本身改了也要重新打包，安裝檔才會是最新的畫面
+      - "app.py"
+      - "db.py"
+      - "models/**"
       - "run_app.py"
       - "FinanceApp.spec"
       - "installer/**"
