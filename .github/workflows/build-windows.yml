@@ -1,0 +1,157 @@
+# 用 GitHub 的 Windows 雲端機器自動打包安裝程式
+#
+# 什麼時候會跑：
+# - PR 有改到打包相關的檔案時（確認打包沒有壞掉）
+# - 推送 v 開頭的標籤時（例如 v1.0.0，用標籤的數字當版本號）
+# - 在 GitHub 網頁的 Actions 分頁手動按「Run workflow」
+#
+# 跑完後，在那次執行的頁面最下面「Artifacts」可以下載 FinanceApp-Setup 安裝檔。
+# 這台雲端機器是全新的，裡面沒有任何個人資料，所以打包出來的安裝檔也不會有。
+
+name: 打包 Windows 安裝程式
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "run_app.py"
+      - "FinanceApp.spec"
+      - "installer/**"
+      - "requirements*.txt"
+      - ".streamlit/config.toml"
+      - ".github/workflows/build-windows.yml"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    # 萬一有步驟卡住，30 分鐘後自動停止（預設要等 6 小時）
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安裝套件
+        run: python -m pip install -r requirements-build.txt
+
+      - name: 跑測試
+        run: python -m pytest -q
+
+      - name: PyInstaller 打包 exe
+        run: pyinstaller --noconfirm FinanceApp.spec
+
+      - name: 安裝最新版 Inno Setup
+        # 雲端機器內建的版本可能比較舊，中文語言檔需要 6.5 以上
+        run: choco install innosetup -y --no-progress
+
+      - name: 決定版本號
+        id: version
+        run: |
+          # 標籤 v1.2.3 → 1.2.3；其他情況用 0.0.執行次數，方便分辨是哪一次打包
+          if ("${{ github.ref_type }}" -eq "tag") { $v = "${{ github.ref_name }}".TrimStart("v") }
+          else { $v = "0.0.${{ github.run_number }}" }
+          "value=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Inno Setup 打包安裝程式
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=${{ steps.version.outputs.value }}" installer\FinanceApp.iss
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: 實際安裝並啟動，確認程式打得開
+        run: |
+          $setup = Get-ChildItem dist\installer\FinanceApp-Setup-*.exe | Select-Object -First 1
+          # /VERYSILENT：不顯示安裝精靈，直接用預設選項安裝
+          Start-Process $setup.FullName -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait
+          $exe = "$env:LOCALAPPDATA\Programs\FinanceApp\FinanceApp.exe"
+          if (-not (Test-Path $exe)) { Write-Error "安裝後找不到 $exe"; exit 1 }
+
+          # 啟動程式，最多等 90 秒，看 Streamlit 的健康檢查網址有沒有回應
+          # （平常連接埠是隨機挑的，測試時用環境變數固定成 8501，才知道要問哪裡）
+          $env:FINANCE_APP_PORT = "8501"
+          # 打開視窗的除錯連接埠，等一下才能問視窗「現在顯示的是什麼頁面」
+          $env:FINANCE_APP_DEBUG_PORT = "9222"
+          $proc = Start-Process $exe -PassThru
+          $ok = $false
+          for ($i = 0; $i -lt 90; $i++) {
+            Start-Sleep -Seconds 1
+            try {
+              $r = Invoke-WebRequest "http://127.0.0.1:8501/_stcore/health" -UseBasicParsing -TimeoutSec 2
+              if ($r.Content -eq "ok") { $ok = $true; break }
+            } catch {}
+          }
+          # 再等 15 秒，確認視窗沒有當掉、也沒有跳出錯誤，畫面也有時間畫好
+          if ($ok) { Start-Sleep -Seconds 15 }
+
+          # 拍一張螢幕截圖，上傳到 Artifacts，方便看視窗實際長怎樣
+          try {
+            Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+            $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bmp = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+            [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            New-Item -ItemType Directory -Force dist\screenshot | Out-Null
+            $bmp.Save("$PWD\dist\screenshot\window.png")
+          } catch { Write-Host "截圖失敗：$_" }
+
+          # 連進視窗裡的網頁引擎，確認畫面真的畫好了（標題變成「個人理財」），
+          # 沒畫好的話會印出網頁的錯誤訊息
+          python -m pip install -q websocket-client
+          python .github\scripts\check_window.py 9222
+          $pageOk = ($LASTEXITCODE -eq 0)
+          $appLog = "$env:USERPROFILE\FinanceApp\app.log"
+          if (Test-Path $appLog) { Write-Host "--- app.log"; Get-Content $appLog }
+          $errorLog = "$env:USERPROFILE\FinanceApp\error.log"
+          if (-not $pageOk) {
+            # 畫面沒畫好：直接跟伺服器要網頁用到的檔案，看是哪個檔案卡住
+            $html = (Invoke-WebRequest "http://127.0.0.1:8501/" -UseBasicParsing -TimeoutSec 20).Content
+            [regex]::Matches($html, '(?:src|href)="([^"]+)"') | ForEach-Object {
+              $u = $_.Groups[1].Value
+              if ($u -notmatch '^https?:') { $u = "http://127.0.0.1:8501/" + $u.TrimStart('.', '/') }
+              $t = [Diagnostics.Stopwatch]::StartNew()
+              try {
+                $r = Invoke-WebRequest $u -UseBasicParsing -TimeoutSec 20
+                Write-Host ("{0} {1} bytes {2} ms {3}" -f $r.StatusCode, $r.RawContentLength, $t.ElapsedMilliseconds, $u)
+              } catch { Write-Host ("FAILED after {0} ms {1}: {2}" -f $t.ElapsedMilliseconds, $u, $_) }
+            }
+          }
+          if (-not $ok -or -not $pageOk -or $proc.HasExited -or (Test-Path $errorLog)) {
+            if (Test-Path $errorLog) { Get-Content $errorLog }
+            $serverLog = "$env:USERPROFILE\FinanceApp\server.log"
+            if (Test-Path $serverLog) { Get-Content $serverLog -Tail 40 }
+            Get-Process FinanceApp -ErrorAction SilentlyContinue | Stop-Process -Force
+            Write-Error "安裝後的程式沒有正常啟動"
+            exit 1
+          }
+          Write-Host "安裝後的程式可以正常啟動，視窗也開著"
+
+          # 只強制關掉視窗那個 process，確認背景伺服器會自己跟著結束，不會留在背景
+          Stop-Process -Id $proc.Id -Force
+          Start-Sleep -Seconds 8
+          $left = Get-Process FinanceApp -ErrorAction SilentlyContinue
+          if ($left) {
+            $left | Stop-Process -Force
+            Write-Error "視窗關掉後，背景伺服器還留著"
+            exit 1
+          }
+          Write-Host "視窗關掉後，背景伺服器也結束了"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshot
+          path: dist/screenshot/*.png
+          if-no-files-found: ignore
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FinanceApp-Setup-${{ steps.version.outputs.value }}
+          path: dist/installer/*.exe
+          retention-days: 30

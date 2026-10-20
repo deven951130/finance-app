@@ -114,34 +114,58 @@ FINANCE_DB=data/example.db streamlit run app.py
 pytest
 ```
 
-## 打包成獨立程式（exe）
+## 安裝成 Windows 軟體
 
-不想每次開終端機，可以打包成點兩下就能用的程式，使用的電腦**不需要安裝 Python**。
+想像一般軟體一樣「安裝精靈 → 開始選單 → 點兩下開啟」，可以打包成安裝程式。使用的電腦**不需要安裝 Python**。
 
-> 打包只能在「目標系統」上做：Windows 的 exe 要在 Windows 上打包，Mac 版要在 Mac 上打包。
+### 方法一：在 GitHub 上自動打包（不用在自己電腦裝任何東西）
 
-**Windows**：在 finance-app 資料夾裡點兩下 `build_exe.bat`。完成後程式在 `dist\FinanceApp\FinanceApp.exe`。
+1. 到 GitHub 這個 repo 的 **Actions** 分頁，選左邊「打包 Windows 安裝程式」，按右邊 **Run workflow**。
+2. 大約 10 分鐘後打開那次執行，在最下面 **Artifacts** 下載 `FinanceApp-Setup-…`，解壓縮後就是安裝檔。
 
-**macOS**：在終端機執行 `bash build_mac.sh`。完成後程式在 `dist/FinanceApp/FinanceApp`。
+GitHub 的雲端機器是全新的，裡面沒有你的資料，所以安裝檔裡也不會有。
 
-使用方式：
-- 點兩下 `FinanceApp.exe`，會出現一個黑色視窗，瀏覽器自動打開程式。**關掉黑色視窗就結束程式。**
-- 整個 `dist/FinanceApp` 資料夾要一起搬（大約 200 MB），不能只複製 exe。可以對 exe 按右鍵建立桌面捷徑。
-- exe 版的資料存在 `家目錄/FinanceApp/finance.db`（例如 `C:\Users\你的名字\FinanceApp\finance.db`），更新程式不會遺失資料。實際位置顯示在「設定」頁最下面。
-- 第一次執行時，Windows 可能會跳出「Windows 已保護您的電腦」。這是因為程式沒有付費的數位簽章，按「其他資訊 → 仍要執行」即可；Mac 則是按右鍵選「打開」。
+### 方法二：在自己的 Windows 電腦打包
 
-如果點開後視窗馬上關掉：
-- 確認點的是 `dist\FinanceApp\FinanceApp.exe`，**不是** `build` 資料夾裡的那個（那個是暫存檔，不能用）。
-- 程式出錯時，視窗會停住並顯示錯誤；錯誤也會存到 `家目錄/FinanceApp/error.log`。
+1. 安裝 [Inno Setup](https://jrsoftware.org/isdl.php) 6.5 以上（或在終端機輸入 `winget install JRSoftware.InnoSetup`）。這是免費的安裝程式製作工具，只有打包的電腦需要。
+2. 在 finance-app 資料夾裡點兩下 `build_exe.bat`。
+3. 完成後會自動打開 `dist\installer`，裡面的 `FinanceApp-Setup-1.0.0.exe` 就是安裝檔。
+
+沒有安裝 Inno Setup 也可以跑 `build_exe.bat`，只是只會產生 `dist\FinanceApp\FinanceApp.exe`（免安裝版，整個資料夾要一起搬）。
+
+### 安裝與使用
+
+- 點兩下安裝檔，照著精靈按「下一步」。**不需要系統管理員權限**，程式裝在 `C:\Users\你的名字\AppData\Local\Programs\FinanceApp`。
+- 裝好後，開始選單和桌面會有「個人理財管理系統」。點開會先出現「正在啟動」，幾秒後就是理財系統的畫面，和一般軟體一樣有自己的視窗，不需要開瀏覽器。**關掉視窗就結束程式。**
+- 視窗用的是 Windows 內建的 Edge 網頁元件（WebView2），Windows 10／11 都已經內建。如果打開是空白，可以到微軟網站安裝「WebView2 Runtime」。
+- 第一次安裝或執行時，Windows 可能會跳出「Windows 已保護您的電腦」。這是因為程式沒有付費的數位簽章，按「其他資訊 → 仍要執行」即可。
+- 要更新：直接安裝新版的安裝檔，會覆蓋舊版。
+- 要移除：Windows「設定 → 應用程式」找到「個人理財管理系統」解除安裝，或用開始選單裡的「解除安裝」。
+
+### 你的資料在哪裡
+
+- 資料存在 `C:\Users\你的名字\FinanceApp\finance.db`，**不在**安裝資料夾裡。實際位置顯示在「設定」頁最下面。
+- 安裝檔只包含程式，不包含任何資料。更新、重新安裝、解除安裝都**不會**刪掉你的資料；要徹底清除，請自己刪掉那個資料夾。
+- 換電腦時，把 `finance.db` 複製到新電腦的同一個位置即可。
+
+如果打不開：程式會跳出對話框說明錯誤，錯誤也會存到 `C:\Users\你的名字\FinanceApp\error.log`，背景伺服器的訊息在同一個資料夾的 `server.log`。
+
+### macOS
+
+在終端機執行 `bash build_mac.sh`，完成後程式在 `dist/FinanceApp/FinanceApp`（目前只有免安裝版）。第一次打開要按右鍵選「打開」。資料存在 `家目錄/FinanceApp/finance.db`。
 
 相關檔案：
 
 | 檔案 | 用途 |
 |---|---|
-| `run_app.py` | exe 的啟動入口，代替我們輸入 `streamlit run app.py` |
+| `run_app.py` | exe 的啟動入口：在背景啟動 Streamlit，再用 pywebview 開一個視窗顯示畫面 |
 | `FinanceApp.spec` | PyInstaller 打包設定：要打包哪些檔案 |
-| `build_exe.bat` / `build_mac.sh` | 一鍵打包腳本 |
+| `build_exe.bat` / `build_mac.sh` | 一鍵打包腳本（Windows 版會接著做安裝程式） |
 | `requirements-build.txt` | 打包才需要的套件（PyInstaller） |
+| `installer/FinanceApp.iss` | Inno Setup 安裝程式設定：安裝位置、捷徑、解除安裝 |
+| `installer/icon.ico` | 程式圖示 |
+| `installer/ChineseTraditional.isl` | 安裝精靈的繁體中文翻譯（來自 Inno Setup 官方） |
+| `.github/workflows/build-windows.yml` | 在 GitHub 雲端自動打包並實際安裝測試 |
 
 ## 技術架構
 
@@ -159,8 +183,9 @@ finance-app/
 ├── seed_example.py     # 產生虛構範例資料
 ├── run_app.py          # exe 啟動入口
 ├── FinanceApp.spec     # PyInstaller 打包設定
-├── build_exe.bat       # Windows 打包腳本
+├── build_exe.bat       # Windows 打包腳本（exe + 安裝程式）
 ├── build_mac.sh        # macOS 打包腳本
+├── installer/          # Windows 安裝程式設定、圖示
 ├── models/
 │   ├── budget.py       # 本月還能花多少
 │   ├── cashflow.py     # 每月現金流
