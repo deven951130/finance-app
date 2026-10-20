@@ -8,27 +8,32 @@
 
 ## 下載（Windows）
 
-不想安裝 Python 的話，可以直接下載打包好的 Windows 版（Windows 10 / 11，64 位元）：
+不想安裝 Python 的話，可以直接下載安裝檔（Windows 10 / 11，64 位元）：
 
-1. 到 [Releases](https://github.com/deven951130/finance-app/releases/latest) 下載 `FinanceApp-Windows-v1.0.0.zip`。
-2. 解壓縮到任何資料夾（例如桌面）。**整個資料夾要放在一起**，不能只複製 exe，也不要直接在 zip 裡面執行。
-3. 點兩下資料夾裡的 `FinanceApp.exe`，會出現一個黑色視窗，瀏覽器會自動打開程式。**關掉黑色視窗就結束程式。**
-4. 第一次執行如果跳出「Windows 已保護您的電腦」，按「其他資訊 → 仍要執行」。這是因為程式沒有付費的數位簽章；少數防毒軟體也可能誤判用 PyInstaller 打包的程式。
+1. 到 [Releases](https://github.com/deven951130/finance-app/releases/latest) 下載 `FinanceApp-Setup-x.y.z.exe`。
+2. 點兩下安裝檔，照著精靈按「下一步」。**不需要系統管理員權限。**
+3. 開始選單和桌面會出現「個人理財管理系統」，點開就是一個獨立視窗，不用開瀏覽器。
 
-- 資料存在 `C:\Users\你的名字\FinanceApp\finance.db`，只在你自己的電腦上。備份可以複製這個檔案，或在「設定」頁匯出 CSV。
-- 要更新時，下載新版、解壓縮後用新的資料夾取代舊的即可，資料不會遺失。
-- macOS 目前沒有提供下載檔，請參考下面的「打包成獨立程式」自己打包。
+- 第一次安裝如果跳出「Windows 已保護您的電腦」，按「其他資訊 → 仍要執行」（程式沒有付費的數位簽章）。
+- 資料存在 `C:\Users\你的名字\FinanceApp\finance.db`，只在你自己的電腦上；每天會自動備份到同一個資料夾的 `backups\`。
+- 要更新：直接安裝新版，資料不會遺失。詳細說明見下面的「安裝成 Windows 軟體」。
 
 ## 功能介紹
 
 ### 日常收支
-- **記帳**：輸入金額、類別、日期、備註。顯示本月明細、各類別「已花／預算」進度條，以及本月還能花多少。
+- **記帳**：輸入金額、類別、日期、備註。顯示當月明細、各類別「已花／預算」進度條，以及本月還能花多少。
+  - 可以切換月份看以前的紀錄；每一筆都能直接**修改**或刪除。
+  - **最近 6 個月**的花費長條圖（依類別疊起來），金色虛線是每月預算，超支的月份一眼就看得出來。
+- **記一筆**：側邊欄的金色按鈕，不管在哪一頁都能馬上記帳。
 - **每月預算**：吃飯、約會禮物、交通、其他，各自設定金額。
 - **固定支出**：例如電話費、iCloud，可新增、刪除。
 
 「本月還能花多少」= 四個類別的預算總和 − 本月已記帳的支出總和（超支會變負數）。
 
 ### 總覽
+- **第一次打開**會顯示「開始使用」的三個步驟，按了直接跳到該填的頁面
+- **淨資產**大數字，以及它怎麼算出來的（現金 + 股票 − 負債）
+- **淨資產變化**折線圖：每天打開總覽時記一筆，看得到一路的變化
 - **每月現金流**：收入 − 固定支出 − 負債還款 − 生活預算 = 每月可存
 - 單一個股占總市值超過 40% 時提醒
 - 本月當沖次數大於 0 時用橘色提醒（紅色、綠色只留給漲跌）
@@ -36,7 +41,8 @@
 
 ### 負債
 - 名稱、剩餘金額、每月還款
-- 按「已還一期」會同時扣剩餘金額和手上現金（現金不夠時不會扣）
+- 按「已還一期」會同時扣剩餘金額和手上現金（現金不夠時不會扣），並留下**還款紀錄**
+- 這個月已經還過的話，按鈕會變成「本月已還」；真的要提前多還一期，要再確認一次，避免手滑多扣
 - 顯示預計還清月份（假設下一期在下個月繳）
 
 ### 投資
@@ -50,6 +56,8 @@
 
 ### 設定與備份
 - 每月收入、手上現金、緊急預備金、預備金目標（預設 17000）
+- **自動備份**：每天第一次打開時，把資料庫複製一份到 `backups/`，保留最近 14 份
+- **一鍵還原**：在設定頁選一份備份還原；還原前會先把目前的資料另存一份，選錯了還能再還原回來
 - **匯出 CSV 備份**：每張資料表一個 CSV，打包成 zip 下載，可用 Excel 開啟
 
 ## 截圖
@@ -67,6 +75,10 @@
 | 記帳 | 交易紀錄 |
 |---|---|
 | ![記帳](docs/screenshots/expenses.png) | ![交易紀錄](docs/screenshots/trades.png) |
+
+| 設定與備份 |
+|---|
+| ![設定](docs/screenshots/settings.png) |
 
 ## 安裝
 
@@ -131,7 +143,13 @@ GitHub 的雲端機器是全新的，裡面沒有你的資料，所以安裝檔�
 2. 在 finance-app 資料夾裡點兩下 `build_exe.bat`。
 3. 完成後會自動打開 `dist\installer`，裡面的 `FinanceApp-Setup-1.0.0.exe` 就是安裝檔。
 
-沒有安裝 Inno Setup 也可以跑 `build_exe.bat`，只是只會產生 `dist\FinanceApp\FinanceApp.exe`（免安裝版，整個資料夾要一起搬）。
+沒有安裝 Inno Setup 也可以跑 `build_exe.bat`，只是只會準備好 `dist\FinanceApp` 資料夾，不會產生安裝檔。
+
+> 為什麼安裝檔裡不是 PyInstaller 的 `FinanceApp.exe`：沒有數位簽章的 exe 會被部分防毒軟體（例如 Trend Micro）直接刪掉，裝好後捷徑點了沒反應。
+> 現在安裝檔裝的是 python.org 官方的嵌入式 Python（`pythonw.exe` 有官方簽章）加上這個專案的程式碼，捷徑執行 `pythonw.exe run_app.py`。
+> 細節見 `installer/build_runtime.py`。
+>
+> 同樣的原因，在裝有這類防毒軟體的電腦上**自己打包**時，Inno Setup 可能出現 `EndUpdateResource failed`；這時用上面的「方法一」在 GitHub 上打包即可。
 
 ### 安裝與使用
 
@@ -159,7 +177,9 @@ GitHub 的雲端機器是全新的，裡面沒有你的資料，所以安裝檔�
 | 檔案 | 用途 |
 |---|---|
 | `run_app.py` | exe 的啟動入口：在背景啟動 Streamlit，再用 pywebview 開一個視窗顯示畫面 |
-| `FinanceApp.spec` | PyInstaller 打包設定：要打包哪些檔案 |
+| `installer/build_runtime.py` | Windows 安裝檔的內容：官方嵌入式 Python + 套件 + 程式碼 |
+| `requirements-runtime.txt` | 放進 Windows 安裝檔的套件（固定版本） |
+| `FinanceApp.spec` | PyInstaller 打包設定（macOS 用） |
 | `build_exe.bat` / `build_mac.sh` | 一鍵打包腳本（Windows 版會接著做安裝程式） |
 | `requirements-build.txt` | 打包才需要的套件（PyInstaller） |
 | `installer/FinanceApp.iss` | Inno Setup 安裝程式設定：安裝位置、捷徑、解除安裝 |
@@ -174,7 +194,7 @@ GitHub 的雲端機器是全新的，裡面沒有你的資料，所以安裝檔�
 | 畫面 | `app.py` | Streamlit 頁面，只負責顯示和接收輸入 |
 | 資料 | `db.py` | SQLite 讀寫，所有 SQL 都在這裡 |
 | 計算 | `models/` | 純計算函式，不碰資料庫也不碰畫面，方便測試 |
-| 測試 | `tests/` | pytest，測 `models/` 的計算和 CSV 匯出 |
+| 測試 | `tests/` | pytest：`models/` 的計算、資料庫功能（還款紀錄、備份還原…），以及用 AppTest 實際跑每一頁 |
 
 ```
 finance-app/
