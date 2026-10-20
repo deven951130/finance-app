@@ -27,12 +27,13 @@ import streamlit as st
 import db
 from models.budget import (
     CATEGORIES,
-    remaining_by_category,
+    last_n_months,
+    monthly_totals,
     remaining_this_month,
     spent_by_category,
 )
 from models.cashflow import monthly_savings, total_debt_payment
-from models.debt import months_left, payment_this_period, payoff_month
+from models.debt import months_left, paid_in_month, payment_this_period, payoff_month
 from models.dca import monthly_withdrawal, project
 from models.precheck import CHECK_ITEMS, check_order
 from models.stocks import CONCENTRATION_LIMIT, analyze, over_concentrated
@@ -43,6 +44,16 @@ st.set_page_config(page_title="個人理財", page_icon="💰", layout="wide")
 
 # 確保資料表存在
 db.init_db()
+
+# 每天第一次打開時自動備份一份（見 db.auto_backup）。
+# 只在這個瀏覽器分頁第一次執行時做：Streamlit 每次互動都會重跑整個檔案，不用每次都檢查。
+# 備份失敗（例如硬碟滿了）不應該讓整個程式打不開，所以出錯就記下來、在設定頁顯示
+if "backup_checked" not in st.session_state:
+    st.session_state["backup_checked"] = True
+    try:
+        db.auto_backup()
+    except OSError as e:
+        st.session_state["backup_error"] = str(e)
 
 
 # ---------- 配色 ----------
@@ -147,6 +158,14 @@ div[data-testid="stMetricLabel"] p {{ color: {MUTED}; font-size: .9rem; }}
 .hero-num small {{ font-size: 1.2rem; font-weight: 600; margin-left: .4rem; color: {MUTED}; }}
 .hero-note {{ font-size: .85rem; color: {MUTED}; margin-top: .3rem; }}
 
+/* 第一次使用的歡迎畫面 */
+.welcome-why {{ color: {MUTED}; line-height: 1.8; padding-bottom: .4rem; }}
+.step-num {{ font-family: {SERIF}; font-size: 2rem; font-weight: 900; color: {GOLD}; line-height: 1; margin-bottom: .5rem; }}
+.step-text {{ color: {MUTED}; font-size: .92rem; min-height: 2.8em; }}
+
+/* 記帳趨勢下面的小字說明 */
+.trend-note {{ font-size: .85rem; color: {MUTED}; }}
+
 /* 自律提醒：存摺的「摘要」欄，左邊兩個字的標籤、右邊一句說明 */
 .notices {{ margin: .2rem 0 1.2rem; }}
 .notice {{ display: flex; gap: 1rem; padding: 8px 0; border-bottom: 1px solid #CCD6CF; }}
@@ -194,6 +213,10 @@ section[data-testid="stSidebar"] .side-sum span {{ opacity: .8; }}
 /* 列表裡的刪除按鈕：平常淡淡的，滑過才變橘色（紅色留給漲跌） */
 button[kind="tertiary"] {{ color: {MUTED}; }}
 button[kind="tertiary"]:hover {{ color: {WARN}; }}
+
+/* 側邊欄的「記一筆」：金色底配墨色字。Streamlit 預設是白字，在金色上對比太低看不清楚 */
+section[data-testid="stSidebar"] div[data-testid="stPopover"] button {{ color: {TEXT}; font-weight: 700; }}
+section[data-testid="stSidebar"] div[data-testid="stPopover"] button * {{ color: {TEXT}; }}
 
 /* 表單送出按鈕撐滿一點，比較好按 */
 div[data-testid="stFormSubmitButton"] button {{ min-width: 120px; }}
@@ -410,28 +433,35 @@ def chip(text: str, color: str) -> str:
     return f'<span class="chip" style="background:{color}1F;color:{color}">{html.escape(text)}</span>'
 
 
-def donut(data: pd.DataFrame, label: str, value: str, center_text: str,
-          colors: list[str] | None = None) -> alt.Chart:
-    """甜甜圈圖：看每一塊占多少比例（持股占比、預算分配都用它）。
+def show_donut(data: pd.DataFrame, label: str, value: str, center_text: str,
+               colors: list[str] | None = None) -> None:
+    """甜甜圈圖：看每一塊占多少比例（持股占比、預算分配都用它），下面附圖例和百分比。
 
     center_text 是圓圈中間的字，例如總金額。
     colors 是每一塊的顏色（照資料順序）；沒給就用 CHART_COLORS。
+    圖例自己用 HTML 畫在圖下面，不用 Altair 內建的：內建圖例在窄的卡片裡會蓋到圓圈或被裁掉，
+    自己畫還可以順便顯示每一塊的百分比。
     """
+    colors = (colors or CHART_COLORS)[:len(data)]
     data = data.assign(順序=range(len(data)))  # 甜甜圈一塊一塊照資料順序畫
     base = alt.Chart(data).encode(
         theta=alt.Theta(f"{value}:Q", stack=True),
-        # sort：圖例照資料原本的順序排，不要變成依筆畫排序
-        color=alt.Color(f"{label}:N", sort=list(data[label]), scale=alt.Scale(range=colors or CHART_COLORS),
-                        legend=alt.Legend(title=None, orient="right", labelFontSize=13)),
+        color=alt.Color(f"{label}:N", sort=list(data[label]), scale=alt.Scale(range=colors), legend=None),
         order=alt.Order("順序:Q"),
         tooltip=[alt.Tooltip(f"{label}:N"), alt.Tooltip(f"{value}:Q", format=",.0f")],
     )
     # 每一塊之間的縫用卡片底色，看起來像切開的
-    ring = base.mark_arc(innerRadius=62, outerRadius=100, stroke=PAPER, strokeWidth=2)
+    # 半徑不要太大：總覽右邊那張卡片在 1024px 寬的視窗只有約 230px 寬（扣掉內距約 170px），圓圈要放得下
+    ring = base.mark_arc(innerRadius=50, outerRadius=80, stroke=PAPER, strokeWidth=2)
     center = alt.Chart(pd.DataFrame({"t": [center_text]})).mark_text(
         fontSize=16, fontWeight=700, color=TEXT, font=SERIF.replace('"', "")
     ).encode(text="t:N")
-    return (ring + center).properties(height=230)
+    show_chart((ring + center).properties(height=200))
+
+    total = data[value].sum()
+    rows = [(color, html.escape(str(name)), f"{v / total:.0%}" if total else "—")
+            for color, name, v in zip(colors * len(data), data[label], data[value])]
+    st.markdown(ledger_html(rows, total=False), unsafe_allow_html=True)
 
 
 def show_chart(chart: alt.Chart) -> None:
@@ -440,16 +470,46 @@ def show_chart(chart: alt.Chart) -> None:
                     width="stretch")
 
 
-def delete_button(key: str) -> bool:
-    """列表裡每一列的刪除按鈕（低調的垃圾桶圖示）。"""
-    return st.button("刪除", key=key, type="tertiary", icon=":material/delete:")
+def delete_button(key: str, label: str = "刪除") -> bool:
+    """列表裡每一列的刪除按鈕（低調的垃圾桶圖示）。欄位窄的時候 label 給空字串，只留圖示。"""
+    return st.button(label, key=key, type="tertiary", icon=":material/delete:", help="刪除這一筆")
 
 
 # ---------- 頁面：總覽 ----------
 
+def welcome() -> None:
+    """第一次打開（還沒有任何資料）時，總覽頁改成顯示「開始使用」的三個步驟。
+
+    為什麼需要：空的資料庫打開總覽，只會看到一排 0 元，不知道要從哪裡開始。
+    """
+    st.markdown(
+        '<div class="hero" style="margin-bottom:1.2rem"><div><div class="hero-label">歡迎使用</div>'
+        '<div class="hero-num" style="font-size:2.6rem">開一本自己的存摺</div>'
+        '<div class="hero-note">資料只存在這台電腦，不會上傳到任何地方</div></div>'
+        '<div class="welcome-why">花 3 分鐘填好基本資料，之後每天只要記帳，'
+        '這裡就會告訴你：淨資產多少、每月能存多少、這個月還能花多少。</div></div>',
+        unsafe_allow_html=True,
+    )
+    steps = [
+        ("1", "填收入和現金", "每月收入、手上現金、緊急預備金目標。", "settings", "前往設定"),
+        ("2", "設定每月預算", "吃飯、交通……每個類別最多花多少。", "budgets", "設定預算"),
+        ("3", "開始記帳", "每花一筆就記一筆，也可以用左邊的「記一筆」。", "expenses", "去記帳"),
+    ]
+    cols = st.columns(3)
+    for col, (num, title, text, url, label) in zip(cols, steps):
+        with col, st.container(key=f"card_step_{num}"):
+            st.markdown(f'<div class="step-num">{num}</div><div class="card-title">{title}</div>'
+                        f'<p class="step-text">{text}</p>', unsafe_allow_html=True)
+            st.page_link(PAGES[url], label=label, icon=":material/arrow_forward:")
+    st.caption("有負債、股票的話，也可以到「負債」「持股」頁加進來，總覽會一起算進淨資產。")
+
+
 def page_overview() -> None:
     today = date.today()
     page_header("總覽", "現金、投資、負債一次看完")
+    if db.is_empty():
+        welcome()
+        return
 
     settings = db.get_settings()
     cash = settings["cash_on_hand"]
@@ -473,6 +533,9 @@ def page_overview() -> None:
         f'{hero_rows}</div>',
         unsafe_allow_html=True,
     )
+    # 每次打開總覽就記下今天的淨資產（同一天會覆蓋），累積起來就是下面的「淨資產變化」
+    networth = cash + total_value - total_debt
+    db.record_networth(today.isoformat(), networth)
 
     # --- 提醒：持股集中度、本月當沖 ---
     # 股票名稱和代號是自己輸入的，放進 HTML 前先 html.escape，避免畫面壞掉
@@ -527,9 +590,11 @@ def page_overview() -> None:
         if analyzed:
             weights = pd.DataFrame({"股票": [m["name"] for m in analyzed],
                                     "市值": [m["value"] for m in analyzed]})
-            show_chart(donut(weights, "股票", "市值", money(total_value)))
+            show_donut(weights, "股票", "市值", money(total_value))
         else:
             st.info("還沒有持股")
+
+    networth_trend()
 
     # --- 本月預算使用 ---
     month_expenses = db.get_expenses_in_month(today.year, today.month)
@@ -541,6 +606,36 @@ def page_overview() -> None:
         for i, c in enumerate(CATEGORIES):
             with cols[i % 2]:
                 budget_bar(c, spent[c], budgets.get(c, 0.0))
+
+
+def networth_trend() -> None:
+    """淨資產變化的折線圖。至少要有兩天的紀錄才畫（一個點畫不出變化）。
+
+    看到數字一天天往上，是持續記帳最好的動力。
+    """
+    history = db.get_networth_history()
+    if len(history) < 2:
+        return
+    data = pd.DataFrame(history)
+    data["日期"] = pd.to_datetime(data["date"])
+    change = history[-1]["value"] - history[0]["value"]
+    first = history[0]["date"]
+    with st.container(key="card_networth"):
+        card_title("淨資產變化", f"從 {first[:4]} 年 {int(first[5:7])} 月 {int(first[8:])} 日到今天 "
+                   + ("增加" if change >= 0 else "減少") + f" {money(abs(change))}")
+        x = alt.X("日期:T", title=None, axis=alt.Axis(format="%Y/%m", grid=False, labelFontSize=12,
+                                                     tickCount="month"))
+        y = alt.Y("value:Q", title=None,
+                  axis=alt.Axis(labelExpr="format(datum.value / 10000, ',') + ' 萬'", gridColor="#E1E8E3"))
+        area = alt.Chart(data).mark_area(
+            color=alt.Gradient(gradient="linear", x1=1, x2=1, y1=1, y2=0,
+                               stops=[alt.GradientStop(color=PAPER, offset=0),
+                                      alt.GradientStop(color="#C9D5E6", offset=1)]),
+            line={"color": INK, "strokeWidth": 2.5},
+        ).encode(x=x, y=y, tooltip=[alt.Tooltip("date:N", title="日期"),
+                                     alt.Tooltip("value:Q", title="淨資產", format=",.0f")])
+        last = alt.Chart(data.tail(1)).mark_circle(size=70, color=INK).encode(x=x, y=y)
+        show_chart((area + last).properties(height=220))
 
 
 # ---------- 頁面：記帳 ----------
@@ -570,49 +665,127 @@ def page_expenses() -> None:
                 db.add_expense(amount, category, expense_date.isoformat(), note)
                 done(f"已記下：{category} {money(amount)}")
 
-    # --- 本月統計 ---
-    month_expenses = db.get_expenses_in_month(today.year, today.month)
-    budgets = db.get_budgets()
-    remaining = remaining_this_month(budgets, month_expenses)
-    total_spent = sum(e["amount"] for e in month_expenses)
+    # --- 選月份：預設本月，也可以回頭看以前的月份 ---
+    this_month = f"{today.year:04d}-{today.month:02d}"
+    # 本月一定在選單裡（就算還沒記帳）；sorted(set(...)) 去掉重複再排序，新的在前面
+    months = sorted(set([this_month] + db.get_expense_months()), reverse=True)
 
     with stat_col:
+        ym = st.selectbox("月份", months, key="expense_month", label_visibility="collapsed",
+                          format_func=lambda m: f"{m[:4]} 年 {int(m[5:])} 月" + ("（本月）" if m == this_month else ""))
+        year, month = int(ym[:4]), int(ym[5:])
+        is_this_month = ym == this_month
+        word = "本月" if is_this_month else "當月"
+
+        month_expenses = db.get_expenses_in_month(year, month)
+        budgets = db.get_budgets()
+        remaining = remaining_this_month(budgets, month_expenses)
+        total_spent = sum(e["amount"] for e in month_expenses)
+
         m1, m2 = summary_strip("expenses", 2)
+        label = f"{word}還能花" if is_this_month else "比預算剩下"
         if remaining >= 0:
-            m1.metric("本月還能花", money(remaining))
+            m1.metric(label, money(remaining))
         else:
             # 超支用橘色（config.toml 的 orangeColor），紅色留給漲跌
-            m1.metric("本月還能花", money(remaining), delta="已超支",
+            m1.metric(label, money(remaining), delta="已超支",
                       delta_color="orange", delta_arrow="off")
-        m2.metric("本月已花", money(total_spent))
+        m2.metric(f"{word}已花", money(total_spent))
 
         with st.container(key="card_budget_bars"):
-            card_title(f"{today.year} 年 {today.month} 月各類別")
+            card_title(f"{year} 年 {month} 月各類別")
             spent = spent_by_category(month_expenses)
             for c in CATEGORIES:
                 budget_bar(c, spent[c], budgets.get(c, 0.0))
 
-    # --- 本月明細 ---
+    # --- 當月明細 ---
     with st.container(key="card_expense_list"):
-        card_title("本月明細", f"共 {len(month_expenses)} 筆")
+        card_title(f"{word}明細", f"共 {len(month_expenses)} 筆")
         if not month_expenses:
-            st.info("本月還沒有記帳")
-            return
+            st.info(f"{word}還沒有記帳")
+        else:
+            widths = [2, 2, 2, 4, 1.4]  # st.columns 的寬度比例，表頭和每一列共用
+            for col, text in zip(st.columns(widths), ["日期", "類別", "金額", "備註", ""]):
+                col.caption(text)
+            for e in month_expenses:
+                col1, col2, col3, col4, col5 = st.columns(widths, vertical_alignment="center")
+                col1.write(e["date"])
+                col2.markdown(category_label(e["category"]), unsafe_allow_html=True)
+                col3.write(f"**{money(e['amount'])}**")
+                col4.write(plain(e["note"] or ""))
+                # 每個按鈕需要唯一的 key，所以用支出的 id
+                with col5:
+                    edit_col, del_col = st.columns(2, gap="small")
+                    with edit_col:
+                        edit_expense(e)
+                    with del_col:
+                        if delete_button(f"del_exp_{e['id']}", label=""):
+                            db.delete_expense(e["id"])
+                            st.rerun()  # 立刻重跑，讓畫面更新
 
-        widths = [2, 2, 2, 4, 1]  # st.columns 的寬度比例，表頭和每一列共用
-        for col, text in zip(st.columns(widths), ["日期", "類別", "金額", "備註", ""]):
-            col.caption(text)
-        for e in month_expenses:
-            col1, col2, col3, col4, col5 = st.columns(widths, vertical_alignment="center")
-            col1.write(e["date"])
-            col2.markdown(category_label(e["category"]), unsafe_allow_html=True)
-            col3.write(f"**{money(e['amount'])}**")
-            col4.write(plain(e["note"] or ""))
-            # 每個按鈕需要唯一的 key，所以用支出的 id
-            with col5:
-                if delete_button(f"del_exp_{e['id']}"):
-                    db.delete_expense(e["id"])
-                    st.rerun()  # 立刻重跑，讓畫面更新
+    expense_trend(budgets)
+
+
+def edit_expense(e: dict) -> None:
+    """明細裡每一列的「修改」：點了跳出一個小視窗，改完按儲存。記錯不用再刪掉重記。"""
+    with st.popover("", icon=":material/edit:", help="修改這一筆", type="tertiary"):
+        with st.form(f"edit_exp_{e['id']}", border=False):
+            amount = st.number_input("金額", min_value=0.0, step=10.0, format="%.0f",
+                                     value=float(e["amount"]))
+            category = st.selectbox("類別", CATEGORIES,
+                                    index=CATEGORIES.index(e["category"]) if e["category"] in CATEGORIES else 0)
+            new_date = st.date_input("日期", value=date.fromisoformat(e["date"]))
+            note = st.text_input("備註", value=e["note"] or "")
+            if st.form_submit_button("儲存", type="primary", icon=":material/save:"):
+                if amount <= 0:
+                    st.warning("金額要大於 0")
+                else:
+                    db.update_expense(e["id"], amount, category, new_date.isoformat(), note)
+                    done("已修改")
+
+
+def expense_trend(budgets: dict[str, float]) -> None:
+    """最近 6 個月每月花了多少（依類別疊起來），旁邊一條虛線是每月預算，一眼看出哪個月花太多。"""
+    months = last_n_months(date.today(), 6)
+    data = pd.DataFrame(monthly_totals(db.get_expenses_since(f"{months[0]}-01"), months))
+    if data["金額"].sum() == 0:
+        return  # 還沒有任何記帳，不畫空的圖
+
+    budget_total = sum(budgets.values())
+    # 月份顯示成「10 月」比「2026-10」好讀；跨年時一月顯示年份
+    # （標籤要「每個月」算一次，不是每一列算一次，不然同一個月會變成兩根長條）
+    labels = {m: (f"{m[:4]}/{int(m[5:])}月" if i == 0 or m.endswith("-01") else f"{int(m[5:])}月")
+              for i, m in enumerate(months)}
+    data["月"] = data["月份"].map(labels)
+    order = [labels[m] for m in months]
+    data["順序"] = [CATEGORIES.index(c) for c in data["類別"]]  # 疊的順序和圖例一樣
+
+    with st.container(key="card_expense_trend"):
+        totals = data.groupby("月份")["金額"].sum()
+        avg = totals[totals > 0].mean()
+        card_title("最近 6 個月", f"有記帳的月份平均每月 {money(avg)}")
+        bars = alt.Chart(data).mark_bar(size=34, cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
+            x=alt.X("月:N", sort=order, title=None, axis=alt.Axis(labelAngle=0, labelFontSize=12)),
+            y=alt.Y("金額:Q", title=None, axis=alt.Axis(format=",.0f", gridColor="#E1E8E3")),
+            color=alt.Color("類別:N", sort=CATEGORIES,
+                            scale=alt.Scale(domain=CATEGORIES, range=[CATEGORY_COLORS[c] for c in CATEGORIES]),
+                            legend=alt.Legend(title=None, orient="top", labelFontSize=12)),
+            order=alt.Order("順序:Q"),
+            tooltip=["月份:N", "類別:N", alt.Tooltip("金額:Q", format=",.0f")],
+        )
+        chart = bars
+        if budget_total > 0:
+            # 預算線：金色虛線。超過這條線的月份就是超支
+            rule = alt.Chart(pd.DataFrame({"預算": [budget_total]})).mark_rule(
+                color=GOLD, strokeDash=[6, 4], strokeWidth=2
+            ).encode(y="預算:Q", tooltip=[alt.Tooltip("預算:Q", format=",.0f", title="每月預算")])
+            chart = bars + rule
+        show_chart(chart.properties(height=260))
+        if budget_total > 0:
+            over = [m for m, v in totals.items() if v > budget_total]
+            note = (f"金色虛線是每月預算 {money(budget_total)}。"
+                    + (f"超過預算的月份：{'、'.join(f'{int(m[5:])} 月' for m in over)}。" if over else "每個月都在預算內。"))
+            st.markdown(f'<div class="trend-note">{note}</div>', unsafe_allow_html=True)
 
 
 # ---------- 頁面：每月生活預算 ----------
@@ -643,8 +816,8 @@ def page_budgets() -> None:
         if total > 0:
             split = pd.DataFrame({"類別": list(new_budgets.keys()),
                                   "金額": list(new_budgets.values())})
-            show_chart(donut(split, "類別", "金額", money(total),
-                             colors=[CATEGORY_COLORS[c] for c in new_budgets]))
+            show_donut(split, "類別", "金額", money(total),
+                       colors=[CATEGORY_COLORS[c] for c in new_budgets])
         else:
             st.info("還沒有設定預算")
 
@@ -743,21 +916,42 @@ def page_debts() -> None:
                 col1.markdown(big_number("剩餘金額", money(d["remaining"])), unsafe_allow_html=True)
                 col2.markdown(big_number("每月還款", money(d["monthly_payment"])), unsafe_allow_html=True)
 
+                payments = db.get_debt_payments(d["id"])
                 b1, b2 = st.columns([3, 1])
                 if ym is not None:
                     pay = payment_this_period(d["remaining"], d["monthly_payment"])
-                    if b1.button(f"已還一期（{money(pay)}）", key=f"pay_{d['id']}",
-                                 type="primary", icon=":material/check:"):
-                        try:
-                            db.pay_debt_installment(d["id"])
-                        except ValueError as e:  # 現金不夠時，db 會丟出 ValueError，兩邊都不扣
-                            st.warning(str(e))
-                        else:  # 沒有出錯才會走到這裡（try 的 else）
-                            done(f"已還一期 {money(pay)}，手上現金也扣掉了")
+                    with b1:
+                        if paid_in_month(payments, today.year, today.month):
+                            # 這個月已經按過了：不直接給「已還一期」按鈕，避免手滑按兩次、多扣一期。
+                            # 真的要提前多還一期（例如一次繳兩期），點開再確認一次
+                            st.markdown(chip(f"本月已還 {payments[0]['date'][5:].replace('-', '/')}", INK),
+                                        unsafe_allow_html=True)
+                            with st.popover("提前再還一期", icon=":material/more_time:"):
+                                st.write(f"這個月已經還過了。確定要再還一期 {money(pay)} 嗎？")
+                                if st.button("確定再還一期", key=f"pay_again_{d['id']}", type="primary"):
+                                    pay_installment(d["id"], pay)
+                        elif st.button(f"已還一期（{money(pay)}）", key=f"pay_{d['id']}",
+                                       type="primary", icon=":material/check:"):
+                            pay_installment(d["id"], pay)
                 with b2:
                     if delete_button(f"del_debt_{d['id']}"):
                         db.delete_debt(d["id"])
                         st.rerun()
+
+                if payments:
+                    with st.expander(f"還款紀錄（{len(payments)} 筆，共 {money(sum(p['amount'] for p in payments))}）"):
+                        ledger_rows = [("", p["date"], money(p["amount"])) for p in payments[:24]]
+                        st.markdown(ledger_html(ledger_rows, total=False), unsafe_allow_html=True)
+
+
+def pay_installment(debt_id: int, pay: float) -> None:
+    """按下「已還一期」：扣負債、扣現金、記一筆還款紀錄。"""
+    try:
+        db.pay_debt_installment(debt_id)
+    except ValueError as e:  # 現金不夠時，db 會丟出 ValueError，什麼都不扣
+        st.warning(str(e))
+    else:  # 沒有出錯才會走到這裡（try 的 else）
+        done(f"已還一期 {money(pay)}，手上現金也扣掉了")
 
 
 # ---------- 頁面：持股 ----------
@@ -820,7 +1014,7 @@ def page_stocks() -> None:
             card_title("持股占比", f"單一個股上限 {CONCENTRATION_LIMIT:.0%}")
             weights = pd.DataFrame({"股票": [m["name"] for m in analyzed],
                                     "市值": [m["value"] for m in analyzed]})
-            show_chart(donut(weights, "股票", "市值", money(total_value)))
+            show_donut(weights, "股票", "市值", money(total_value))
 
     with st.container(key="card_add_holding"):
         card_title("新增持股")
@@ -1098,10 +1292,71 @@ def page_settings() -> None:
                 icon=":material/download:",
             )
             st.caption("備份檔裡是你的真實資料，請不要放進專案資料夾或上傳到 GitHub。")
-            st.caption(f"資料庫檔案位置：{os.path.abspath(db.DB_PATH)}")
+
+        # --- 自動備份與還原 ---
+        with st.container(key="card_restore"):
+            backups = db.list_backups()
+            card_title("自動備份", f"每天第一次打開時備份，保留最近 {db.BACKUP_KEEP} 份")
+            if "backup_error" in st.session_state:
+                st.warning(f"今天的自動備份失敗：{st.session_state['backup_error']}")
+            if not backups:
+                st.write("還沒有備份。明天打開程式時會自動備份第一份。")
+            else:
+                choice = st.selectbox("選一份備份", backups, format_func=backup_label)
+                with st.popover("還原這份備份", icon=":material/settings_backup_restore:"):
+                    st.write(f"目前的資料會被換成「{backup_label(choice)}」那時候的樣子。"
+                             "還原前會先把目前的資料另存一份，選錯了還可以再還原回來。")
+                    if st.button("確定還原", type="primary"):
+                        try:
+                            db.restore_backup(choice)
+                        except ValueError as e:
+                            st.warning(str(e))
+                        else:
+                            done("已還原備份")
+            st.caption(f"資料庫：{short_path(db.DB_PATH)}")
+            st.caption(f"備份資料夾：{short_path(db.backup_dir())}")
+
+
+def short_path(path: str) -> str:
+    """把家目錄換成 ~ 顯示，例如 ~\\FinanceApp\\finance.db。
+
+    完整路徑裡有 Windows 的使用者名稱，截圖分享時容易不小心洩漏，所以顯示時縮短。
+    """
+    path = os.path.abspath(path)
+    home = os.path.expanduser("~")
+    return "~" + path[len(home):] if path.startswith(home) else path
+
+
+def backup_label(path: str) -> str:
+    """備份檔在選單裡的顯示名稱，例如「2026-10-21」「2026-10-21 14:03 還原前」。"""
+    name = os.path.splitext(os.path.basename(path))[0]
+    stamp = name.split("-", 1)[1]  # 去掉開頭的「finance-」
+    if stamp.endswith("-before-restore"):
+        d = stamp[:10]
+        t = stamp[11:15]
+        return f"{d} {t[:2]}:{t[2:]} 還原前的資料"
+    return stamp
 
 
 # ---------- 側邊欄：導覽 ----------
+
+def quick_add() -> None:
+    """側邊欄的「記一筆」：不管在哪一頁都能馬上記帳，不用先切到記帳頁。
+
+    記帳是每天最常做的事，步驟越少越容易持續。
+    """
+    with st.sidebar.popover("記一筆", icon=":material/add:", width="stretch", type="primary"):
+        with st.form("quick_add", clear_on_submit=True, border=False):
+            amount = st.number_input("金額", min_value=0.0, step=10.0, format="%.0f")
+            category = st.radio("類別", CATEGORIES, horizontal=True)
+            note = st.text_input("備註（可不填）")
+            if st.form_submit_button("記下來", type="primary", icon=":material/check:", width="stretch"):
+                if amount <= 0:
+                    st.warning("金額要大於 0")
+                else:
+                    db.add_expense(amount, category, date.today().isoformat(), note)
+                    done(f"已記下：{category} {money(amount)}")
+
 
 def sidebar_summary() -> None:
     """側邊欄下方的小摘要：本月還能花多少、每月可存多少。"""
@@ -1150,12 +1405,15 @@ inject_css()
 
 # st.navigation 負責「現在在哪一頁」，position="hidden" 表示側邊欄由我們自己畫
 pages = {}
+PAGES = {}  # 網址名稱 → 頁面，給頁面裡的 st.page_link 用（例如歡迎畫面的「前往設定」）
 for group, items in NAV:
     # 總覽是預設頁，網址固定是「/」，所以不另外設 url_path
     pages[group] = [st.Page(func, title=title, icon=icon,
                             url_path=None if url == "overview" else url,
                             default=(url == "overview"))
                     for func, title, icon, url in items]
+    for (_, _, _, url), page in zip(items, pages[group]):
+        PAGES[url] = page
 current = st.navigation(pages, position="hidden")
 
 with st.sidebar:
@@ -1166,6 +1424,8 @@ with st.sidebar:
         st.markdown(f'<div class="nav-group">{group}</div>', unsafe_allow_html=True)
         for p in group_pages:
             st.page_link(p, width="stretch")
+    st.markdown('<div style="height:.8rem"></div>', unsafe_allow_html=True)
+quick_add()
 sidebar_summary()
 
 # 上一次存檔留下的通知（見 done()），顯示一次就拿掉

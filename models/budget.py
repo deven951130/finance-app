@@ -57,3 +57,27 @@ def remaining_by_category(budgets: dict[str, float], month_expenses: list[dict])
     """每個類別各自還能花多少：{類別: 預算 − 已花}。"""
     spent = spent_by_category(month_expenses)
     return {c: budgets.get(c, 0.0) - spent.get(c, 0.0) for c in CATEGORIES}
+
+
+def last_n_months(today: date, n: int) -> list[str]:
+    """包含本月在內的最近 n 個月，格式 'YYYY-MM'，舊的在前面。
+
+    例如今天 2026-02-10、n=3 → ['2025-12', '2026-01', '2026-02']。
+    """
+    # 把年月換算成「第幾個月」再往回推，跨年時不用另外判斷
+    total = today.year * 12 + (today.month - 1)
+    return [f"{m // 12:04d}-{m % 12 + 1:02d}" for m in range(total - n + 1, total + 1)]
+
+
+def monthly_totals(expenses: list[dict], months: list[str]) -> list[dict]:
+    """把支出依「月份 × 類別」加總，給趨勢圖用。
+
+    回傳 [{"月份": 'YYYY-MM', "類別": ..., "金額": ...}, ...]，
+    months 裡的每個月、CATEGORIES 的每個類別都會出現（沒花錢就是 0），圖上才不會少一格。
+    """
+    totals = {(m, c): 0.0 for m in months for c in CATEGORIES}
+    for e in expenses:
+        key = (e["date"][:7], e["category"])
+        if key in totals:
+            totals[key] += e["amount"]
+    return [{"月份": m, "類別": c, "金額": v} for (m, c), v in totals.items()]
