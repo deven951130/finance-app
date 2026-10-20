@@ -83,11 +83,18 @@ jobs:
             if (-not (Test-Path $f)) { Write-Error "安裝後找不到 $f"; exit 1 }
           }
           # 確認開始選單捷徑指向 pythonw.exe run_app.py（使用者點的就是這個）
-          $lnk = Get-ChildItem "$env:APPDATA\Microsoft\Windows\Start Menu\Programs" -Recurse -Filter *.lnk |
-                 Where-Object { (New-Object -ComObject WScript.Shell).CreateShortcut($_.FullName).TargetPath -eq $exe } |
+          # 個人和「所有使用者」的開始選單都找；路徑用 -like 比對（大小寫、短檔名寫法可能不同）
+          $shell = New-Object -ComObject WScript.Shell
+          $menus = @("$env:APPDATA\Microsoft\Windows\Start Menu\Programs", "$env:ProgramData\Microsoft\Windows\Start Menu\Programs")
+          $all = $menus | Where-Object { Test-Path $_ } | ForEach-Object { Get-ChildItem $_ -Recurse -Filter *.lnk }
+          $lnk = $all | Where-Object { $shell.CreateShortcut($_.FullName).TargetPath -like "*\FinanceApp\python\pythonw.exe" } |
                  Select-Object -First 1
-          if (-not $lnk) { Write-Error "開始選單沒有指向 $exe 的捷徑"; exit 1 }
-          $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk.FullName)
+          if (-not $lnk) {
+            $all | Where-Object { $_.FullName -match "理財|FinanceApp" } |
+              ForEach-Object { Write-Host "$($_.FullName) → $($shell.CreateShortcut($_.FullName).TargetPath)" }
+            Write-Error "開始選單沒有指向 pythonw.exe 的捷徑"; exit 1
+          }
+          $sc = $shell.CreateShortcut($lnk.FullName)
           Write-Host "捷徑：$($lnk.Name) → $($sc.TargetPath) $($sc.Arguments)"
 
           # 啟動程式，最多等 90 秒，看 Streamlit 的健康檢查網址有沒有回應
