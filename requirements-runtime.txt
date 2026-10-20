@@ -1,0 +1,8 @@
+# Packages that go INTO the Windows installer (installer/build_runtime.py).
+# Keep this file ASCII-only: pip on Windows reads it with the system code page (cp950).
+# Versions are pinned so the installer always contains a tested combination.
+streamlit==1.65.0
+pandas==3.0.6
+altair==6.3.0
+# Opens the app in its own window (uses Edge WebView2 on Windows)
+pywebview==6.2.1

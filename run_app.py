@@ -29,6 +29,18 @@ APP_TITLE = "個人理財管理系統"
 # 資料、錯誤紀錄都放在這個資料夾（和 db.py 的資料庫位置相同）
 LOG_DIR = os.path.join(os.path.expanduser("~"), "FinanceApp")
 SERVER_LOG = os.path.join(LOG_DIR, "server.log")
+
+# 視窗版的資料庫一律放在 ~/FinanceApp/finance.db。
+# PyInstaller 版靠 db.py 的 sys.frozen 判斷；安裝版是「官方 Python + 原始碼」（見 installer/build_runtime.py），
+# 沒有 sys.frozen，所以在這裡用環境變數告訴 db.py。背景伺服器是這個程式開的，會繼承這個環境變數。
+# setdefault：測試時可以先設定 FINANCE_DB 指到別的檔案，不會被蓋掉
+os.environ.setdefault("FINANCE_DB", os.path.join(LOG_DIR, "finance.db"))
+
+# 安裝版的圖示放在 app 資料夾的上一層（見 installer/build_runtime.py）
+ICON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "icon.ico")
+# 工作列用這個名字分辨「是哪個程式」。不設定的話，視窗會被當成 Python，工作列顯示 Python 的圖示。
+# 要和安裝程式捷徑的 AppUserModelID 一樣（installer/FinanceApp.iss）
+APP_ID = "deven951130.FinanceApp"
 # 視窗這一端的紀錄：用了哪個網頁引擎、載入了哪個網址。畫面出問題時看這個檔案
 APP_LOG = os.path.join(LOG_DIR, "app.log")
 
@@ -195,8 +207,31 @@ def current_renderer(webview_module) -> str:
         return "unknown"
 
 
+def set_window_icon(window) -> None:
+    """把視窗左上角和工作列的圖示換成理財系統的圖示（Windows 安裝版才有 icon.ico）。
+
+    pythonw.exe 開的視窗預設是 Python 的圖示。WM_SETICON 是 Windows 換視窗圖示的訊息，
+    用 SendMessage 送給視窗就好，不用管視窗是哪個執行緒建立的。
+    """
+    if sys.platform != "win32" or not os.path.exists(ICON):
+        return
+    import ctypes
+    user32 = ctypes.windll.user32
+    user32.LoadImageW.restype = ctypes.c_void_p
+    user32.SendMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p]
+    hwnd = window.native.Handle.ToInt64()  # pywebview 在 Windows 上的視窗是 WinForms 的 Form
+    IMAGE_ICON, LR_LOADFROMFILE, WM_SETICON = 1, 0x10, 0x80
+    for kind, size in [(0, 16), (1, 32)]:  # 0 = 小圖示（標題列），1 = 大圖示（工作列、Alt+Tab）
+        icon = user32.LoadImageW(None, os.path.abspath(ICON), IMAGE_ICON, size, size, LR_LOADFROMFILE)
+        if icon:
+            user32.SendMessageW(hwnd, WM_SETICON, kind, icon)
+
+
 def main() -> None:
     os.makedirs(LOG_DIR, exist_ok=True)
+    if sys.platform == "win32":
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
     # 把紀錄寫進 app.log（pywebview 自己的警告也會一起寫進來）
     logging.basicConfig(
         filename=APP_LOG, filemode="w", encoding="utf-8", level=logging.INFO,
@@ -244,6 +279,15 @@ def main() -> None:
             log.exception("startup failed")
             startup_error.append(traceback.format_exc())
             window.destroy()
+
+    def on_shown() -> None:
+        """視窗真的出現之後才換圖示（在這之前 window.native 還是 None）。"""
+        try:
+            set_window_icon(window)
+        except Exception:  # 換不了圖示不影響使用，記下來就好
+            log.exception("set icon failed")
+
+    window.events.shown += on_shown
 
     try:
         # start() 會一直停在這裡，直到使用者關掉視窗

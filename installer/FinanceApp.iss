@@ -1,12 +1,17 @@
 ﻿; =====================================================================
 ; Windows 安裝程式設定檔（Inno Setup）
 ;
-; 做什麼：把 PyInstaller 打包好的 dist\FinanceApp 資料夾，包成一個
+; 做什麼：把 installer\build_runtime.py 準備好的 dist\FinanceApp 資料夾
+;        （官方嵌入式 Python + 套件 + 理財系統程式碼），包成一個
 ;        FinanceApp-Setup-版本.exe。使用者點兩下就會出現安裝精靈，
 ;        裝好後開始選單和桌面都有捷徑，也可以在「設定 > 應用程式」解除安裝。
 ;
+; 為什麼不是 PyInstaller 的 FinanceApp.exe：沒有數位簽章的 exe 會被部分防毒軟體
+; （例如 Trend Micro）直接刪掉，捷徑點了沒反應。捷徑改成執行官方有簽章的 pythonw.exe，
+; 詳細原因見 installer\build_runtime.py 最上面的說明。
+;
 ; 怎麼用：一般不用自己跑，build_exe.bat 會自動呼叫。
-;        手動執行：先跑完 PyInstaller，再執行
+;        手動執行：先跑 python installer\build_runtime.py，再執行
 ;        "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\FinanceApp.iss
 ; 結果：dist\installer\FinanceApp-Setup-1.0.0.exe
 ;
@@ -44,9 +49,9 @@ ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\dist\installer
 OutputBaseFilename=FinanceApp-Setup-{#AppVersion}
 SetupIconFile=icon.ico
-UninstallDisplayIcon={app}\FinanceApp.exe
+UninstallDisplayIcon={app}\icon.ico
 UninstallDisplayName=個人理財管理系統
-; lzma2 + solid：壓縮率最好，300 MB 左右的程式可以壓到 100 MB 以下
+; lzma2 + solid：壓縮率最好，約 280 MB 的程式可以壓到 100 MB 以下
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -61,24 +66,36 @@ Name: "chinesetraditional"; MessagesFile: "ChineseTraditional.isl"
 Name: "desktopicon"; Description: "建立桌面捷徑"; GroupDescription: "其他選項："
 
 [InstallDelete]
-; 更新版本時，先刪掉舊版的程式庫資料夾，避免新舊檔案混在一起出錯。
-; _internal 裡只有程式，沒有你的資料。
+; 更新版本時，先刪掉舊版的程式，避免新舊檔案混在一起出錯。這些資料夾裡只有程式，沒有你的資料。
+; _internal 和 FinanceApp.exe 是以前 PyInstaller 版留下的
 Type: filesandordirs; Name: "{app}\_internal"
+Type: files; Name: "{app}\FinanceApp.exe"
+Type: filesandordirs; Name: "{app}\python"
+Type: filesandordirs; Name: "{app}\app"
+
+[UninstallDelete]
+; Python 第一次執行時會自己產生 __pycache__（加快下次啟動），不是安裝進去的檔案，
+; 解除安裝時要另外指定刪掉，不然會留下空的資料夾
+Type: filesandordirs; Name: "{app}\python"
+Type: filesandordirs; Name: "{app}\app"
 
 [Files]
-; 把 PyInstaller 打包好的整個資料夾複製到安裝位置
+; 把 build_runtime.py 準備好的整個資料夾複製到安裝位置
 Source: "..\dist\FinanceApp\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
+; 捷徑執行「pythonw.exe run_app.py」（pythonw = 沒有黑色視窗的 python）。
+; IconFilename：捷徑用理財系統的圖示，不是 Python 的。
+; AppUserModelID：和 run_app.py 的 APP_ID 一樣，工作列才會顯示理財系統的圖示、不和其他 Python 程式擠在一起。
 ; 開始選單
-Name: "{group}\個人理財管理系統"; Filename: "{app}\FinanceApp.exe"; Comment: "記帳、預算、負債與持股管理"
+Name: "{group}\個人理財管理系統"; Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\app\run_app.py"""; WorkingDir: "{app}\app"; IconFilename: "{app}\icon.ico"; AppUserModelID: "deven951130.FinanceApp"; Comment: "記帳、預算、負債與持股管理"
 Name: "{group}\解除安裝 個人理財管理系統"; Filename: "{uninstallexe}"
 ; 桌面（只有勾選「建立桌面捷徑」時才建立）
-Name: "{autodesktop}\個人理財管理系統"; Filename: "{app}\FinanceApp.exe"; Tasks: desktopicon
+Name: "{autodesktop}\個人理財管理系統"; Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\app\run_app.py"""; WorkingDir: "{app}\app"; IconFilename: "{app}\icon.ico"; AppUserModelID: "deven951130.FinanceApp"; Tasks: desktopicon
 
 [Run]
 ; 安裝完成的最後一頁，提供「立即啟動」的勾選框
-Filename: "{app}\FinanceApp.exe"; Description: "立即啟動 個人理財管理系統"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\app\run_app.py"""; WorkingDir: "{app}\app"; Description: "立即啟動 個人理財管理系統"; Flags: nowait postinstall skipifsilent
 
 [Code]
 // 解除安裝完成後提醒：資料沒有被刪掉，在哪裡
