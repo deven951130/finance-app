@@ -199,14 +199,14 @@ background:#f4f9fc;color:#1C2833;font-family:'Noto Sans TC','Microsoft JhengHei'
 """
 
 # Oneiroverse 開啟畫面：oneiroverse/ 是 OneiHub/brand-kit 的複本（改那邊再用 sync.ps1 同步，不要直接改）
-SPLASH_LAYERS = ("crescent", "o", "wordmark")
+SPLASH_LAYERS = ("crescent", "o", "wordmark", "trail")
 
 
 def loading_html() -> str:
     """啟動頁：先播 Oneiroverse 開啟畫面，播完留下「正在啟動」的文字。
 
     pywebview 用 html= 開的頁面沒有網址，讀不到旁邊的檔案，
-    所以把 splash.js 直接寫進頁面、三張 Logo 圖轉成 data: 網址（把圖片內容編碼進字串裡）。
+    所以把 splash.js 直接寫進頁面、四張 Logo 圖轉成 data: 網址（把圖片內容編碼進字串裡）。
     播完會設定 window.ovDone = true，main() 等到這個值和伺服器都準備好才換頁。
     少了任何一個檔案就只顯示文字，不影響啟動。
     """

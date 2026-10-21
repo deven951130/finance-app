@@ -1,10 +1,10 @@
 // Oneiroverse 開啟畫面（所有 Oneiroverse 軟體共用，正本在 OneiHub/brand-kit/，改完用 sync.ps1 複製到各 App）。
 //
 // 用法一：<body> 的第一個元素放 <script src=".../splash.js"></script>，載入時自動在整個視窗上播一次。
-//   同資料夾要有 crescent.png、o.png、wordmark.png（source/make_splash.py 從 Logo 原圖產生）。
+//   同資料夾要有 crescent.png、o.png、wordmark.png、trail.png（source/make_splash.py 從 Logo 原圖產生）。
 //   重新整理 / 上一頁不會再播。<script> 加 data-manual 就只載入不自動播。
 // 用法二：OneiroverseSplash.play({ root, images, onDone })，在指定元素上播（打包工具 import 進來時用這個）。
-//   images 是 { crescent, o, wordmark } 三張圖的網址；沒給時用 splash.js 同資料夾的檔案。
+//   images 是 { crescent, o, wordmark, trail } 四張圖的網址；沒給時用 splash.js 同資料夾的檔案。
 // 點一下或按任意鍵可跳過；系統設定「減少動態效果」時只淡入淡出。
 (() => {
   if (typeof window === "undefined" || window.OneiroverseSplash) return;
@@ -12,7 +12,7 @@
   // 內嵌在 HTML 裡的 <script>（沒有 src）沒有同資料夾可找，這時要用 play({ images }) 自己給圖
   const scriptBase = script?.src ? new URL(".", script.src).href : "";
   // 淺色開啟畫面：圖層以 #f4f9fc 為底色做 color-to-alpha（source/make_splash.py），疊在這個顏色上才會和原圖一樣。
-  const conic = "conic-gradient(from calc(352deg - var(--ov-sw)) at 51.1% 38.2%, transparent 0deg, #000 min(14deg, var(--ov-sw)), #000 var(--ov-sw), transparent var(--ov-sw))";
+  const conic = "conic-gradient(from calc(352deg - var(--ov-sw)) at 49.5% 31.1%, transparent 0deg, #000 min(14deg, var(--ov-sw)), #000 var(--ov-sw), transparent var(--ov-sw))";
   const CSS = `
 @property --ov-sw { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
 html.ov-lock { overflow: hidden; }
@@ -24,14 +24,14 @@ html.ov-lock { overflow: hidden; }
 .ov-splash.ov-fixed { position: fixed; }
 .ov-splash.ov-out { opacity: 0; pointer-events: none; }
 .ov-splash .ov-stars { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; }
-.ov-splash .ov-logo { position: relative; width: min(560px, 78%, calc(70cqh * 732 / 518)); aspect-ratio: 732 / 518;
+.ov-splash .ov-logo { position: relative; width: min(580px, 78%, calc(72cqh * 756 / 618)); aspect-ratio: 756 / 618;
   transition: transform .7s cubic-bezier(.4, 0, .2, 1); }
 .ov-splash { container-type: size; }
 .ov-splash.ov-out .ov-logo { transform: scale(1.05); }
 .ov-splash .ov-logo > * { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; -webkit-user-drag: none; }
 .ov-splash .ov-crescent { -webkit-mask-image: ${conic}; mask-image: ${conic}; }
 .ov-splash .ov-crescent.ov-drawn { -webkit-mask-image: none; mask-image: none; }
-.ov-splash .ov-o { transform-origin: 51.9% 34%; }
+.ov-splash .ov-o { transform-origin: 51.2% 29%; }
 .ov-splash .ov-shine {
   background: linear-gradient(100deg, transparent 42%, rgba(160, 240, 240, .85) 50%, transparent 58%) 100% 0 / 300% 100% no-repeat;
   -webkit-mask: var(--ov-word) center / 100% 100% no-repeat; mask: var(--ov-word) center / 100% 100% no-repeat; }
@@ -41,6 +41,8 @@ html.ov-lock { overflow: hidden; }
 .ov-splash.ov-play .ov-o { animation: ov-o 1s cubic-bezier(.2, .7, .2, 1) .95s both, ov-pulse 1.1s ease-in-out 2.15s; }
 .ov-splash.ov-play .ov-word { animation: ov-word 1.1s cubic-bezier(.2, .7, .2, 1) 1.4s both; }
 .ov-splash.ov-play .ov-shine { animation: ov-shine 1s ease-in-out 2.2s both; }
+/* 流星尾由左往右劃過，接著星星閃一下 */
+.ov-splash.ov-play .ov-trail { animation: ov-trail .8s cubic-bezier(.3, .6, .3, 1) 2.1s both, ov-twinkle .9s ease-in-out 2.8s; }
 @keyframes ov-fade { from { opacity: 0 } to { opacity: 1 } }
 @keyframes ov-draw { from { --ov-sw: 0deg } to { --ov-sw: 270deg } }
 @keyframes ov-o { from { opacity: 0; transform: scale(.8); filter: blur(10px) saturate(1.6) }
@@ -48,6 +50,8 @@ html.ov-lock { overflow: hidden; }
 @keyframes ov-word { from { opacity: 0; clip-path: inset(0 50% 0 50%); filter: blur(6px); transform: translateY(8px) }
   to { opacity: 1; clip-path: inset(0); filter: none; transform: none } }
 @keyframes ov-shine { from { opacity: 1; background-position: 100% 0 } to { opacity: 1; background-position: 0 0 } }
+@keyframes ov-trail { from { opacity: 0; clip-path: inset(0 100% 0 0) } 30% { opacity: 1 } to { opacity: 1; clip-path: inset(0) } }
+@keyframes ov-twinkle { 50% { filter: brightness(1.15) saturate(1.5) drop-shadow(0 0 6px rgba(170, 160, 235, .8)) } }
 @keyframes ov-pulse { 50% { filter: saturate(1.4) brightness(1.08) } }
 @media (prefers-reduced-motion: reduce) {
   .ov-splash .ov-crescent { -webkit-mask-image: none; mask-image: none; }
@@ -76,7 +80,8 @@ html.ov-lock { overflow: hidden; }
     el.setAttribute("aria-label", "Oneiroverse");
     el.innerHTML = `<canvas class="ov-stars"></canvas><div class="ov-logo">
       <img class="ov-crescent" alt="" src="${src("crescent")}"><img class="ov-o" alt="" src="${src("o")}">
-      <img class="ov-word" alt="" src="${src("wordmark")}"><div class="ov-shine"></div></div>`;
+      <img class="ov-word" alt="" src="${src("wordmark")}"><div class="ov-shine"></div>
+      <img class="ov-trail" alt="" src="${src("trail")}"></div>`;
     el.querySelector(".ov-shine").style.setProperty("--ov-word", `url("${src("wordmark")}")`);
     const crescent = el.querySelector(".ov-crescent");
     crescent.addEventListener("animationend", (e) => e.animationName === "ov-draw" && crescent.classList.add("ov-drawn"));
@@ -145,7 +150,7 @@ html.ov-lock { overflow: hidden; }
       clearTimeout(failsafe);
       el.classList.add("ov-play");
       if (!reduced) raf = requestAnimationFrame(draw);
-      timer = setTimeout(exit, reduced ? 1200 : 3100);
+      timer = setTimeout(exit, reduced ? 1200 : 3600);
     });
 
     return {

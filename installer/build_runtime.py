@@ -45,7 +45,8 @@ EMBED_VERSIONS = {
 APP_FILES = ["app.py", "db.py", "quotes.py", "run_app.py", "update_check.py", "version.py",
              ".streamlit/config.toml",
              # Oneiroverse 開啟畫面（run_app.py 的啟動頁用）
-             "oneiroverse/splash.js", "oneiroverse/crescent.png", "oneiroverse/o.png", "oneiroverse/wordmark.png"] + \
+             "oneiroverse/splash.js", "oneiroverse/crescent.png", "oneiroverse/o.png", "oneiroverse/wordmark.png",
+             "oneiroverse/trail.png"] + \
     [os.path.relpath(p, ROOT) for p in glob.glob(os.path.join(ROOT, "models", "*.py"))]
 
 
