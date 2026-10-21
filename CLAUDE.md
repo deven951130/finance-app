@@ -30,7 +30,7 @@
 python -m venv .venv && source .venv/bin/activate   # Windows：.venv\Scripts\activate
 pip install -r requirements.txt
 streamlit run app.py          # http://localhost:8501，第一次會自動建立 data/finance.db
-pytest                        # 目前 83 passed（含 tests/test_app.py 的畫面測試）
+pytest                        # 目前 90 passed（含 tests/test_app.py 的畫面測試）
 
 # 用虛構範例資料啟動（不會動到 finance.db）
 python seed_example.py
@@ -84,6 +84,7 @@ FINANCE_DB=data/example.db streamlit run app.py
 - `.streamlit/config.toml` 由 `FinanceApp.spec` 打包到 exe 裡 `app.py` 旁邊的 `.streamlit/`（Streamlit 會讀「主程式旁邊」的設定檔），所以 exe 版也有主題；改完要重新打包才會生效。`run_app.py` 的命令列參數優先權比 config.toml 高，兩邊不要設成不一樣的值。
 - 改完畫面跑 `pytest`：`tests/test_app.py` 會用 AppTest 跑每一頁（有資料、空資料各一次）。頁面是函式，AppTest 的 `switch_page` 用不了，所以測試用 `runpy` 執行 app.py 再呼叫頁面函式。新增頁面要加進 `PAGES` 清單。
 - 頁面裡要連到別頁用 `st.page_link(PAGES["網址名"])`（`PAGES` 在 app.py 檔尾建立）。
+- **測試時不要讓使用者在帶著 `FINANCE_DB` 的程式裡記帳**：環境變數會傳給子程式（例如從 Onei Hub 開的理財系統），記下的資料會寫進測試資料庫，正常打開時就「不見了」（2026-10-21 發生過）。現在 `FINANCE_DB` 指到平常以外的檔案時，每頁最上面會顯示警告（`db.is_unusual_db`）。測完要把帶測試環境變數的程式全部關掉，用一般方式重開。
 
 ## Windows 打包的坑（不要再犯）
 
@@ -111,6 +112,7 @@ FINANCE_DB=data/example.db streamlit run app.py
 - ✅ MIT 授權、README 下載說明
 - ✅ 介面改版：存摺風格，並修正全面測試找到的問題（2026-10-13）
 - ✅ Windows 安裝程式（安裝精靈、獨立視窗、CI 實際安裝測試）
+- ✅ v1.0.0 發布（2026-10-21）：GitHub Release 附安裝檔；也上架 Onei Hub（伺服器 `downloads/finance-app-v1.0.0-win-x64.zip`）
 - ✅ v1 實用功能（2026-10-21）：首次使用引導、側邊欄記一筆、記帳月份切換與修改、6 個月趨勢、淨資產變化、還款紀錄、每日自動備份與還原；安裝版改用官方嵌入式 Python
 
 下一步建議的待辦（完整清單和理由見 `docs/開發紀錄.md` 的「待辦」）：

@@ -1428,6 +1428,12 @@ with st.sidebar:
 quick_add()
 sidebar_summary()
 
+# 用的不是平常那個資料庫時，每一頁最上面都提醒（見 db.is_unusual_db）：
+# 這裡記的資料不會出現在平常打開的程式裡，不提醒的話使用者會以為資料不見了
+if db.is_unusual_db():
+    st.warning(f"目前使用的資料庫是 {short_path(db.DB_PATH)}，不是平常那一個。"
+               "在這裡記的資料，平常打開程式時看不到。", icon=":material/database:")
+
 # 上一次存檔留下的通知（見 done()），顯示一次就拿掉
 if "toast" in st.session_state:
     st.toast(st.session_state.pop("toast"), icon=":material/check_circle:")

@@ -135,3 +135,10 @@ def test_設定頁可以還原備份(seeded):
     assert not at.exception
     notes = [e["note"] for e in db.get_expenses_in_month(date.today().year, date.today().month)]
     assert "備份後才記" not in notes
+
+
+def test_用的不是平常的資料庫時_每頁都提醒(seeded):
+    # seeded 用的是暫時資料夾裡的資料庫，就是「不是平常那個」
+    at = make_app("page_expenses").run()
+    assert not at.exception
+    assert any("不是平常那一個" in w.value for w in at.warning)

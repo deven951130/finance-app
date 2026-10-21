@@ -552,12 +552,43 @@ def restore_backup(path: str) -> str:
 # ---------- 是不是剛開始使用 ----------
 
 def is_empty() -> bool:
-    """還沒輸入任何資料（第一次打開程式）時回傳 True，總覽頁會改成顯示「開始使用」的步驟。"""
+    """還沒輸入任何資料（第一次打開程式）時回傳 True，總覽頁會改成顯示「開始使用」的步驟。
+
+    只要「任何一個地方」填過東西就不算空的：設定改過任何一項（例如只填了手上現金）、
+    設過任何一個預算，或任何一張表有資料。以前只看「每月收入」，只填了現金或預算的人
+    下次打開又看到歡迎畫面，會以為資料不見了。
+    """
     with get_connection() as conn:
         for table in ["expenses", "fixed_expenses", "debts", "holdings", "trades"]:
             if conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
                 return False
-        income = conn.execute(
-            "SELECT value FROM settings WHERE key = 'monthly_income'"
-        ).fetchone()
-    return not (income and income["value"] > 0)
+        for row in conn.execute("SELECT key, value FROM settings"):
+            if row["value"] != DEFAULT_SETTINGS.get(row["key"], 0.0):
+                return False
+        if conn.execute("SELECT 1 FROM budgets WHERE amount > 0 LIMIT 1").fetchone():
+            return False
+    return True
+
+
+# ---------- 現在用的是不是平常那個資料庫 ----------
+
+def standard_db_paths() -> list[str]:
+    """平常會用到的資料庫位置：視窗版的 ~/FinanceApp/finance.db、原始碼版的 data/finance.db。"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    return [
+        os.path.join(os.path.expanduser("~"), "FinanceApp", "finance.db"),
+        os.path.join(here, "data", "finance.db"),
+    ]
+
+
+def is_unusual_db(path: str | None = None) -> bool:
+    """資料庫是不是「平常那個」以外的檔案（被環境變數 FINANCE_DB 指到別的地方）。
+
+    為什麼要檢查：曾經有測試把 FINANCE_DB 指到暫存資料庫，從那裡開的程式記下的資料都寫進暫存檔，
+    下次正常打開就「不見了」。畫面上明白顯示用的是哪個檔案，這種情況一眼就看得出來。
+    範例資料庫（example.db）是故意用的，不算。
+    """
+    path = os.path.normcase(os.path.abspath(path or DB_PATH))
+    if os.path.basename(path) == "example.db":
+        return False
+    return path not in [os.path.normcase(os.path.abspath(p)) for p in standard_db_paths()]
