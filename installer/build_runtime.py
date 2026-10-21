@@ -42,7 +42,10 @@ EMBED_VERSIONS = {
 
 # 理財系統要用到的程式檔。只放 .py，不放 __pycache__（.pyc 裡有打包電腦的路徑，可能含使用者名稱）
 # 新增最上層的 .py 檔（例如 quotes.py）時要加進來，不然安裝版會找不到模組、一打開就出錯
-APP_FILES = ["app.py", "db.py", "quotes.py", "run_app.py", ".streamlit/config.toml"] + \
+APP_FILES = ["app.py", "db.py", "quotes.py", "run_app.py", "update_check.py", "version.py",
+             ".streamlit/config.toml",
+             # Oneiroverse 開啟畫面（run_app.py 的啟動頁用）
+             "oneiroverse/splash.js", "oneiroverse/crescent.png", "oneiroverse/o.png", "oneiroverse/wordmark.png"] + \
     [os.path.relpath(p, ROOT) for p in glob.glob(os.path.join(ROOT, "models", "*.py"))]
 
 

@@ -27,6 +27,7 @@ import streamlit as st
 
 import db
 import quotes
+import update_check
 from models.budget import (
     CATEGORIES,
     last_n_months,
@@ -39,6 +40,7 @@ from models.debt import months_left, paid_in_month, payment_this_period, payoff_
 from models.dca import monthly_withdrawal, project
 from models.precheck import CHECK_ITEMS, check_order
 from models.quotes import is_trading_time
+from version import APP_VERSION
 from models.stocks import CONCENTRATION_LIMIT, analyze, over_concentrated
 from models.trades import TRADE_TYPES, count_day_trades, total_pnl
 
@@ -1375,7 +1377,9 @@ def page_settings() -> None:
             card_title("股價自動更新")
             on = st.toggle("打開總覽、持股頁時自動更新現價", value=bool(s.get("auto_quotes", 1)))
             st.caption("會連到證交所查詢報價，只送出股票代號（例如 2330），不會送出股數、金額或其他資料。"
-                       "關掉的話程式完全不連網路，現價要自己輸入。")
+                       "關掉的話不會查股價，現價要自己輸入。")
+            st.caption(f"版本 v{APP_VERSION}・每次打開時會到 Onei Hub 伺服器確認是不是最新版"
+                       "（只下載公開的軟體清單，不送出任何資料）。")
             if on != bool(s.get("auto_quotes", 1)):
                 db.save_settings({"auto_quotes": 1.0 if on else 0.0})
                 done("已打開股價自動更新" if on else "已關閉股價自動更新")
@@ -1503,6 +1507,42 @@ NAV = [
 ]
 
 inject_css()
+
+
+def update_gate() -> None:
+    """版本太舊時擋住整個程式，只顯示「需要更新」（見 update_check.py）。
+
+    每個視窗只問伺服器一次（結果存在 session_state），之後換頁不會再連線。
+    沒網路、問不到時 check() 回傳 None，直接放行。
+    放在畫導覽和側邊欄之前，擋住時 st.stop() 讓後面所有東西都不畫，任何一頁都進不去。
+    """
+    if "update_status" not in st.session_state:
+        st.session_state["update_status"] = update_check.check()
+    status = st.session_state["update_status"]
+    if not status or not status["required"]:
+        return
+
+    latest = status["latest"] or status["min"]
+    st.markdown(
+        '<div class="hero" style="margin-top:2rem"><div><div class="hero-label">個人理財</div>'
+        '<div class="hero-num" style="font-size:2.6rem">需要更新</div>'
+        f'<div class="hero-note">目前版本 v{html.escape(APP_VERSION)} 已停止使用</div></div>'
+        f'<div class="welcome-why">請用 Onei Hub 更新到 v{html.escape(latest)} 才能繼續使用。'
+        '你的資料存在 C:\\Users\\你的名字\\FinanceApp，更新不會影響。</div></div>',
+        unsafe_allow_html=True,
+    )
+    col1, col2, _ = st.columns([1, 1, 2])
+    if col1.button("用 Onei Hub 更新", type="primary", icon=":material/system_update:", width="stretch"):
+        if update_check.open_hub():
+            st.toast("已經打開 Onei Hub，請在「個人理財」頁按「需要更新」", icon=":material/check_circle:")
+        else:
+            st.warning("找不到 Onei Hub，請先按右邊的「下載 Onei Hub」安裝。")
+    if col2.button("下載 Onei Hub", icon=":material/download:", width="stretch"):
+        update_check.open_download_page()
+    st.stop()
+
+
+update_gate()
 
 # st.navigation 負責「現在在哪一頁」，position="hidden" 表示側邊欄由我們自己畫
 pages = {}

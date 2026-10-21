@@ -17,6 +17,7 @@ from streamlit.testing.v1 import AppTest
 
 import db
 import quotes
+import update_check
 
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -43,6 +44,8 @@ def no_network(monkeypatch):
         return quotes.QuoteResult(prices={s: FAKE_PRICE for s in symbols}, quote_date=date.today(),
                                   source="realtime")
     monkeypatch.setattr(quotes, "fetch_prices", fake_fetch)
+    # 版本檢查也不連網路：預設當作「不用更新」
+    monkeypatch.setattr(update_check, "check", lambda: None)
     st.cache_data.clear()
 
 
@@ -187,3 +190,33 @@ def test_抓不到股價時保留原價並提醒(seeded, monkeypatch):
     assert not at.exception
     assert db.get_holdings()[0]["price"] == 1000
     assert any("抓不到股價" in w.value for w in at.warning)
+
+
+# ---------- 強制更新 ----------
+
+def test_版本太舊時整個程式被擋住(seeded, monkeypatch):
+    monkeypatch.setattr(update_check, "check", lambda: {"required": True, "latest": "9.0.0", "min": "9.0.0"})
+    at = make_app().run()
+    assert not at.exception
+    assert any("需要更新" in m.value for m in at.markdown)
+    # 總覽頁、側邊欄都沒有畫出來
+    assert not any("淨資產" in m.value for m in at.markdown)
+    assert not at.sidebar.button
+    assert any(b.label == "用 Onei Hub 更新" for b in at.button)
+
+
+def test_按用OneiHub更新會叫出Hub(seeded, monkeypatch):
+    monkeypatch.setattr(update_check, "check", lambda: {"required": True, "latest": "9.0.0", "min": "9.0.0"})
+    opened = []
+    monkeypatch.setattr(update_check, "open_hub", lambda: opened.append(True) or True)
+    at = make_app().run()
+    next(b for b in at.button if b.label == "用 Onei Hub 更新").click()
+    at.run()
+    assert opened == [True]
+
+
+def test_版本夠新時照常使用(seeded, monkeypatch):
+    monkeypatch.setattr(update_check, "check", lambda: {"required": False, "latest": "1.1.0", "min": "1.1.0"})
+    at = make_app().run()
+    assert not at.exception
+    assert any("淨資產" in m.value for m in at.markdown)
