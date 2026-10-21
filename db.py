@@ -16,6 +16,7 @@ import os
 import sqlite3
 import sys
 import zipfile
+from datetime import date, datetime
 
 from models.budget import CATEGORIES
 from models.debt import payment_this_period
@@ -122,6 +123,23 @@ def init_db() -> None:
             " note TEXT)"
         )
 
+        # 還款紀錄：每按一次「已還一期」記一筆，才知道這個月是不是已經還過了。
+        # 舊資料庫沒有這張表，CREATE TABLE IF NOT EXISTS 會自動補上，不用另外寫升級程式
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS debt_payments ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " debt_id INTEGER NOT NULL,"
+            " date TEXT NOT NULL,"
+            " amount REAL NOT NULL)"
+        )
+
+        # 淨資產紀錄：每天一筆（打開總覽時記下當天的淨資產），用來畫「淨資產變化」折線圖
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS networth_history ("
+            " date TEXT PRIMARY KEY,"
+            " value REAL NOT NULL)"
+        )
+
         # INSERT OR IGNORE：如果這個 key 已經有值就不覆蓋，只補上缺少的
         for key, value in DEFAULT_SETTINGS.items():
             conn.execute(
@@ -199,6 +217,35 @@ def get_expenses_in_month(year: int, month: int) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def get_expenses_since(date_str: str) -> list[dict]:
+    """讀取某一天（含）以後的所有支出，給「近幾個月趨勢」用。"""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, amount, category, date, note FROM expenses WHERE date >= ?"
+            " ORDER BY date, id",
+            (date_str,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_expense_months() -> list[str]:
+    """有記帳的月份（'YYYY-MM'），新的在前面。給記帳頁的月份選單用。"""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT substr(date, 1, 7) AS ym FROM expenses ORDER BY ym DESC"
+        ).fetchall()
+    return [row["ym"] for row in rows]
+
+
+def update_expense(expense_id: int, amount: float, category: str, date_str: str, note: str) -> None:
+    """修改一筆支出（記錯金額、類別、日期時用，不用刪掉重記）。"""
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE expenses SET amount = ?, category = ?, date = ?, note = ? WHERE id = ?",
+            (amount, category, date_str, note, expense_id),
+        )
+
+
 def delete_expense(expense_id: int) -> None:
     """刪除一筆支出（記錯時用）。"""
     with get_connection() as conn:
@@ -252,18 +299,32 @@ def add_debt(name: str, remaining: float, monthly_payment: float) -> None:
 
 
 def delete_debt(debt_id: int) -> None:
-    """刪除一筆負債。"""
+    """刪除一筆負債（連同它的還款紀錄）。"""
     with get_connection() as conn:
         conn.execute("DELETE FROM debts WHERE id = ?", (debt_id,))
+        conn.execute("DELETE FROM debt_payments WHERE debt_id = ?", (debt_id,))
 
 
-def pay_debt_installment(debt_id: int) -> float:
-    """「已還一期」：剩餘金額和手上現金同時扣掉這一期的還款，回傳扣了多少。
+def get_debt_payments(debt_id: int) -> list[dict]:
+    """某筆負債的還款紀錄，新的在前面。"""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, date, amount FROM debt_payments WHERE debt_id = ?"
+            " ORDER BY date DESC, id DESC",
+            (debt_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
 
-    兩個數字放在同一個 with 區塊裡更新，這叫「交易（transaction）」：
-    要嘛兩個都改成功，要嘛中途出錯兩個都不改，不會只扣了一邊。
+
+def pay_debt_installment(debt_id: int, date_str: str | None = None) -> float:
+    """「已還一期」：剩餘金額和手上現金同時扣掉這一期的還款，並記一筆還款紀錄，回傳扣了多少。
+
+    三件事放在同一個 with 區塊裡，這叫「交易（transaction）」：
+    要嘛全部成功，要嘛中途出錯全部不改，不會只扣了一邊。
     現金不夠時會丟出 ValueError，什麼都不改。
+    date_str 是還款日期（'YYYY-MM-DD'），沒給就是今天。
     """
+    date_str = date_str or date.today().isoformat()
     with get_connection() as conn:
         debt = conn.execute(
             "SELECT remaining, monthly_payment FROM debts WHERE id = ?", (debt_id,)
@@ -283,6 +344,10 @@ def pay_debt_installment(debt_id: int) -> float:
         )
         conn.execute(
             "UPDATE settings SET value = value - ? WHERE key = 'cash_on_hand'", (pay,)
+        )
+        conn.execute(
+            "INSERT INTO debt_payments (debt_id, date, amount) VALUES (?, ?, ?)",
+            (debt_id, date_str, pay),
         )
     return pay
 
@@ -350,11 +415,29 @@ def delete_trade(trade_id: int) -> None:
         conn.execute("DELETE FROM trades WHERE id = ?", (trade_id,))
 
 
+# ---------- 淨資產紀錄 ----------
+
+def record_networth(date_str: str, value: float) -> None:
+    """記下某一天的淨資產。同一天再記一次會覆蓋（一天只留最後的數字）。"""
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO networth_history (date, value) VALUES (?, ?)",
+            (date_str, value),
+        )
+
+
+def get_networth_history() -> list[dict]:
+    """所有淨資產紀錄，舊的在前面。"""
+    with get_connection() as conn:
+        rows = conn.execute("SELECT date, value FROM networth_history ORDER BY date").fetchall()
+    return [dict(row) for row in rows]
+
+
 # ---------- 匯出 CSV 備份 ----------
 
 # 要備份的資料表
 EXPORT_TABLES = ["settings", "budgets", "expenses", "fixed_expenses",
-                 "debts", "holdings", "trades"]
+                 "debts", "debt_payments", "holdings", "trades", "networth_history"]
 
 
 def export_csv_zip() -> bytes:
@@ -378,3 +461,103 @@ def export_csv_zip() -> bytes:
             # utf-8-sig：在檔案開頭加 BOM，Excel 打開中文才不會變亂碼
             zf.writestr(f"{table}.csv", text.getvalue().encode("utf-8-sig"))
     return buffer.getvalue()
+
+
+# ---------- 自動備份與還原 ----------
+#
+# 為什麼要自動備份：所有資料只存在一個 finance.db 檔，硬碟壞掉、誤刪、不小心按錯「刪除」就救不回來。
+# 做法很簡單：每天第一次打開程式時，把資料庫複製一份到旁邊的 backups 資料夾，只留最近幾份。
+# 備份檔和資料庫在同一個資料夾底下（exe 版是 ~/FinanceApp/backups，原始碼版是 data/backups，
+# data/ 已經被 .gitignore 排除），所以不會被 commit。
+
+BACKUP_KEEP = 14  # 只留最近 14 份，避免越積越多
+
+
+def backup_dir() -> str:
+    """備份資料夾：資料庫旁邊的 backups/。"""
+    return os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), "backups")
+
+
+def _db_stem() -> str:
+    """資料庫檔名去掉副檔名，例如 finance。備份檔名用它開頭，範例資料庫的備份才不會混在一起。"""
+    return os.path.splitext(os.path.basename(DB_PATH))[0]
+
+
+def _copy_db(src: str, dst: str) -> None:
+    """用 SQLite 內建的備份功能複製資料庫。
+
+    不直接用 shutil.copy：如果複製的瞬間程式剛好在寫入，複製出來的檔案可能是壞的；
+    SQLite 的 backup() 會確保複製出來的是一份完整的資料庫。
+    """
+    with sqlite3.connect(src) as source, sqlite3.connect(dst) as target:
+        source.backup(target)
+    # with 只會 commit，不會關閉連線；Windows 上沒關閉的檔案不能刪除或覆蓋，所以要自己關
+    source.close()
+    target.close()
+
+
+def list_backups() -> list[str]:
+    """所有備份檔的完整路徑，新的在前面。"""
+    folder = backup_dir()
+    if not os.path.isdir(folder):
+        return []
+    prefix = _db_stem() + "-"
+    names = [n for n in os.listdir(folder) if n.startswith(prefix) and n.endswith(".db")]
+    # 檔名裡有日期時間（YYYY-MM-DD...），字串排序就是時間排序
+    return [os.path.join(folder, n) for n in sorted(names, reverse=True)]
+
+
+def auto_backup(today: date | None = None) -> str | None:
+    """今天還沒備份過就備份一次，回傳備份檔路徑；今天已經備份過或資料庫還不存在就回傳 None。"""
+    if not os.path.exists(DB_PATH):
+        return None
+    today = today or date.today()
+    folder = backup_dir()
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, f"{_db_stem()}-{today.isoformat()}.db")
+    if os.path.exists(path):
+        return None
+    _copy_db(DB_PATH, path)
+
+    # 只留最近 BACKUP_KEEP 份「每日備份」；還原前另存的那份（檔名有 before-restore）不自動刪
+    daily = [p for p in list_backups() if "before-restore" not in p]
+    for old in daily[BACKUP_KEEP:]:
+        os.remove(old)
+    return path
+
+
+def restore_backup(path: str) -> str:
+    """用備份檔蓋掉目前的資料庫，回傳「還原前另存的那一份」的路徑。
+
+    還原前先把目前的資料另存一份，萬一選錯備份還可以再還原回來。
+    """
+    # 先確認選的檔案真的是這個程式的資料庫，避免把別的檔案蓋上來
+    try:
+        with sqlite3.connect(path) as conn:
+            conn.execute("SELECT key, value FROM settings").fetchall()
+        conn.close()
+    except sqlite3.Error as e:
+        raise ValueError("這個檔案不是理財系統的備份") from e
+
+    folder = backup_dir()
+    os.makedirs(folder, exist_ok=True)
+    stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+    safety = os.path.join(folder, f"{_db_stem()}-{stamp}-before-restore.db")
+    _copy_db(DB_PATH, safety)
+    _copy_db(path, DB_PATH)
+    init_db()  # 舊的備份可能少了新版才有的資料表，補上
+    return safety
+
+
+# ---------- 是不是剛開始使用 ----------
+
+def is_empty() -> bool:
+    """還沒輸入任何資料（第一次打開程式）時回傳 True，總覽頁會改成顯示「開始使用」的步驟。"""
+    with get_connection() as conn:
+        for table in ["expenses", "fixed_expenses", "debts", "holdings", "trades"]:
+            if conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
+                return False
+        income = conn.execute(
+            "SELECT value FROM settings WHERE key = 'monthly_income'"
+        ).fetchone()
+    return not (income and income["value"] > 0)

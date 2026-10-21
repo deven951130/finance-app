@@ -14,7 +14,12 @@ datas = [
     # (來源, 放到 exe 裡的哪個資料夾)
     ("app.py", "."),
     ("db.py", "."),
-    ("models", "models"),
+    # 只打包 .py：整個資料夾會連 __pycache__ 一起帶進去，
+    # 裡面的 .pyc 記錄了打包電腦上的絕對路徑（可能含使用者名稱），不該出現在公開的下載檔
+    ("models/*.py", "models"),
+    # 主題設定：Streamlit 會讀「app.py 旁邊的 .streamlit/config.toml」，
+    # 所以放到和 app.py 同一層的 .streamlit 資料夾，exe 版就會套用一樣的配色和字型
+    (".streamlit/config.toml", ".streamlit"),
 ]
 binaries = []
 hiddenimports = []
@@ -47,10 +52,10 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name="FinanceApp",
-    # console=True：會出現一個黑色視窗。關掉它，程式就結束。
-    # 如果設成 False，程式會在背景一直跑，沒有簡單的方法關掉。
-    console=True,
-    icon=None,  # 之後想換圖示：放一個 icon.ico，改成 icon="icon.ico"
+    # console=False：不要黑色視窗。畫面由 run_app.py 用 pywebview 開的視窗顯示，
+    # 關掉那個視窗，程式（包括背景的伺服器）就會結束。
+    console=False,
+    icon="installer/icon.ico",  # exe 和捷徑上顯示的圖示（安裝程式也用同一個）
 )
 
 # onedir 模式：輸出一個資料夾，啟動比單一 exe 快很多（不用每次解壓 100 多 MB）

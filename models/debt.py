@@ -43,3 +43,9 @@ def payoff_month(remaining: float, monthly_payment: float, today: date) -> tuple
     if n == 0:
         return None
     return add_months(today, n)
+
+
+def paid_in_month(payments: list[dict], year: int, month: int) -> bool:
+    """這個月是不是已經按過「已還一期」。payments 是還款紀錄，每筆至少有 'date'（'YYYY-MM-DD'）。"""
+    prefix = f"{year:04d}-{month:02d}"
+    return any(p["date"].startswith(prefix) for p in payments)

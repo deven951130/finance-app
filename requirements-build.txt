@@ -2,3 +2,5 @@
 # Keep this file ASCII-only: pip on Windows reads it with the system code page (cp950).
 -r requirements.txt
 pyinstaller>=6.10
+# Opens the app in its own window (uses Edge WebView2 on Windows)
+pywebview>=5.0
