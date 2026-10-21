@@ -46,6 +46,12 @@ DEFAULT_SETTINGS = {
     "cash_on_hand": 0.0,       # 手上現金
     "emergency_fund": 0.0,     # 緊急預備金（目前存了多少）
     "emergency_target": 17000.0,  # 預備金目標
+    # 股價自動更新（見 quotes.py）。1 = 開、0 = 關
+    "auto_quotes": 1.0,
+    # 上一次成功抓到股價的資訊（給畫面顯示「股價：10/21 11:46 盤中」）
+    "quotes_fetched_at": 0.0,  # 抓的時間（Unix 時間戳記，秒）
+    "quotes_date": 0.0,        # 行情是哪一天的，寫成 20261021 這種數字
+    "quotes_realtime": 0.0,    # 1 = 即時行情（MIS），0 = 官方每日收盤價
 }
 
 
@@ -374,6 +380,25 @@ def add_holding(name: str, symbol: str, account: str, shares: float,
             (name, symbol, account, shares, avg_price, price),
         )
         conn.execute("UPDATE holdings SET price = ? WHERE symbol = ?", (price, symbol))
+
+
+def update_prices(prices: dict[str, float]) -> int:
+    """自動抓到的股價寫回持股（所有帳戶一起改），回傳更新了幾列。
+
+    prices 的代號已經整理過（去空白、大寫），持股裡的代號也用同樣方式整理後比對，
+    所以使用者輸入「2330 」或「00631l」也對得上。
+    """
+    from models.quotes import normalize_symbol  # 只有這裡用到，放在函式裡避免 db 一載入就依賴股價模組
+
+    updated = 0
+    with get_connection() as conn:
+        rows = conn.execute("SELECT id, symbol FROM holdings").fetchall()
+        for row in rows:
+            price = prices.get(normalize_symbol(row["symbol"]))
+            if price is not None:
+                conn.execute("UPDATE holdings SET price = ? WHERE id = ?", (price, row["id"]))
+                updated += 1
+    return updated
 
 
 def update_price(symbol: str, price: float) -> None:

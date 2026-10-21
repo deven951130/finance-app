@@ -207,3 +207,21 @@ def test_被指到其他檔案_要提醒(tmp_path):
 
 def test_範例資料庫_不提醒(tmp_path):
     assert not db.is_unusual_db(str(tmp_path / "example.db"))
+
+
+# ---------- 自動更新股價寫回持股 ----------
+
+def test_股價寫回持股_代號大小寫空白都對得上(temp_db):
+    db.add_holding("台積電", "2330 ", "A", 10, 900, 900)
+    db.add_holding("台積電", "2330", "B", 10, 900, 900)
+    db.add_holding("槓桿", "00631l", "A", 10, 20, 20)
+    db.add_holding("某基金", "FUND1", "A", 10, 10, 10)
+
+    updated = db.update_prices({"2330": 1000.0, "00631L": 30.0})
+
+    assert updated == 3
+    prices = {(h["symbol"], h["account"]): h["price"] for h in db.get_holdings()}
+    assert prices[("2330 ", "A")] == 1000.0
+    assert prices[("2330", "B")] == 1000.0
+    assert prices[("00631l", "A")] == 30.0
+    assert prices[("FUND1", "A")] == 10  # 沒有報價的保持原價
