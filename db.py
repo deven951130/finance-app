@@ -46,6 +46,12 @@ DEFAULT_SETTINGS = {
     "cash_on_hand": 0.0,       # 手上現金
     "emergency_fund": 0.0,     # 緊急預備金（目前存了多少）
     "emergency_target": 17000.0,  # 預備金目標
+    # 股價自動更新（見 quotes.py）。1 = 開、0 = 關
+    "auto_quotes": 1.0,
+    # 上一次成功抓到股價的資訊（給畫面顯示「股價：10/21 11:46 盤中」）
+    "quotes_fetched_at": 0.0,  # 抓的時間（Unix 時間戳記，秒）
+    "quotes_date": 0.0,        # 行情是哪一天的，寫成 20261021 這種數字
+    "quotes_realtime": 0.0,    # 1 = 即時行情（MIS），0 = 官方每日收盤價
 }
 
 
@@ -376,6 +382,25 @@ def add_holding(name: str, symbol: str, account: str, shares: float,
         conn.execute("UPDATE holdings SET price = ? WHERE symbol = ?", (price, symbol))
 
 
+def update_prices(prices: dict[str, float]) -> int:
+    """自動抓到的股價寫回持股（所有帳戶一起改），回傳更新了幾列。
+
+    prices 的代號已經整理過（去空白、大寫），持股裡的代號也用同樣方式整理後比對，
+    所以使用者輸入「2330 」或「00631l」也對得上。
+    """
+    from models.quotes import normalize_symbol  # 只有這裡用到，放在函式裡避免 db 一載入就依賴股價模組
+
+    updated = 0
+    with get_connection() as conn:
+        rows = conn.execute("SELECT id, symbol FROM holdings").fetchall()
+        for row in rows:
+            price = prices.get(normalize_symbol(row["symbol"]))
+            if price is not None:
+                conn.execute("UPDATE holdings SET price = ? WHERE id = ?", (price, row["id"]))
+                updated += 1
+    return updated
+
+
 def update_price(symbol: str, price: float) -> None:
     """更新某個代號的現價（所有帳戶一起改）。"""
     with get_connection() as conn:
@@ -552,12 +577,43 @@ def restore_backup(path: str) -> str:
 # ---------- 是不是剛開始使用 ----------
 
 def is_empty() -> bool:
-    """還沒輸入任何資料（第一次打開程式）時回傳 True，總覽頁會改成顯示「開始使用」的步驟。"""
+    """還沒輸入任何資料（第一次打開程式）時回傳 True，總覽頁會改成顯示「開始使用」的步驟。
+
+    只要「任何一個地方」填過東西就不算空的：設定改過任何一項（例如只填了手上現金）、
+    設過任何一個預算，或任何一張表有資料。以前只看「每月收入」，只填了現金或預算的人
+    下次打開又看到歡迎畫面，會以為資料不見了。
+    """
     with get_connection() as conn:
         for table in ["expenses", "fixed_expenses", "debts", "holdings", "trades"]:
             if conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
                 return False
-        income = conn.execute(
-            "SELECT value FROM settings WHERE key = 'monthly_income'"
-        ).fetchone()
-    return not (income and income["value"] > 0)
+        for row in conn.execute("SELECT key, value FROM settings"):
+            if row["value"] != DEFAULT_SETTINGS.get(row["key"], 0.0):
+                return False
+        if conn.execute("SELECT 1 FROM budgets WHERE amount > 0 LIMIT 1").fetchone():
+            return False
+    return True
+
+
+# ---------- 現在用的是不是平常那個資料庫 ----------
+
+def standard_db_paths() -> list[str]:
+    """平常會用到的資料庫位置：視窗版的 ~/FinanceApp/finance.db、原始碼版的 data/finance.db。"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    return [
+        os.path.join(os.path.expanduser("~"), "FinanceApp", "finance.db"),
+        os.path.join(here, "data", "finance.db"),
+    ]
+
+
+def is_unusual_db(path: str | None = None) -> bool:
+    """資料庫是不是「平常那個」以外的檔案（被環境變數 FINANCE_DB 指到別的地方）。
+
+    為什麼要檢查：曾經有測試把 FINANCE_DB 指到暫存資料庫，從那裡開的程式記下的資料都寫進暫存檔，
+    下次正常打開就「不見了」。畫面上明白顯示用的是哪個檔案，這種情況一眼就看得出來。
+    範例資料庫（example.db）是故意用的，不算。
+    """
+    path = os.path.normcase(os.path.abspath(path or DB_PATH))
+    if os.path.basename(path) == "example.db":
+        return False
+    return path not in [os.path.normcase(os.path.abspath(p)) for p in standard_db_paths()]

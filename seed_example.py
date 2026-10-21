@@ -46,6 +46,8 @@ def main() -> None:
         "cash_on_hand": 71500,  # 下面學貸還一期會扣 3500，剩 68000
         "emergency_fund": 17000,
         "emergency_target": 17000,
+        # 範例資料不自動抓股價：截圖、試玩時的股價都維持虛構的數字，也不會連網路
+        "auto_quotes": 0,
     })
 
     # 每月生活預算

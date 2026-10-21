@@ -12,9 +12,11 @@ import os
 from datetime import date
 
 import pytest
+import streamlit as st
 from streamlit.testing.v1 import AppTest
 
 import db
+import quotes
 
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -29,6 +31,19 @@ g = runpy.run_path("app.py")
 {call}
 """
     return AppTest.from_string(script, default_timeout=60)
+
+
+FAKE_PRICE = 1234.0
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch):
+    """畫面測試不連網路：抓股價一律回傳固定的假資料，並清掉上一個測試留下的 5 分鐘快取。"""
+    def fake_fetch(symbols):
+        return quotes.QuoteResult(prices={s: FAKE_PRICE for s in symbols}, quote_date=date.today(),
+                                  source="realtime")
+    monkeypatch.setattr(quotes, "fetch_prices", fake_fetch)
+    st.cache_data.clear()
 
 
 @pytest.fixture
@@ -70,10 +85,11 @@ def test_第一次打開_總覽顯示開始使用(temp_db):
 def test_有資料時_總覽顯示淨資產(seeded):
     at = make_app().run()
     assert not at.exception
-    # 淨資產 = 現金 50000 + 股票 10000 − 負債 30000 = 30000
-    assert any("30,000" in m.value and "淨資產" in m.value for m in at.markdown)
+    # 打開總覽會先自動更新股價（測試用的假價格 1234）：
+    # 淨資產 = 現金 50000 + 股票 10 股 × 1234 − 負債 30000 = 32340
+    assert any("32,340" in m.value and "淨資產" in m.value for m in at.markdown)
     # 打開總覽會記下今天的淨資產
-    assert db.get_networth_history()[-1] == {"date": date.today().isoformat(), "value": 30000}
+    assert db.get_networth_history()[-1] == {"date": date.today().isoformat(), "value": 32340}
 
 
 @pytest.mark.parametrize("page", PAGES)
@@ -135,3 +151,39 @@ def test_設定頁可以還原備份(seeded):
     assert not at.exception
     notes = [e["note"] for e in db.get_expenses_in_month(date.today().year, date.today().month)]
     assert "備份後才記" not in notes
+
+
+def test_用的不是平常的資料庫時_每頁都提醒(seeded):
+    # seeded 用的是暫時資料夾裡的資料庫，就是「不是平常那個」
+    at = make_app("page_expenses").run()
+    assert not at.exception
+    assert any("不是平常那一個" in w.value for w in at.warning)
+
+
+# ---------- 股價自動更新 ----------
+
+def test_打開持股頁會自動更新現價(seeded):
+    at = make_app("page_stocks").run()
+    assert not at.exception
+    assert db.get_holdings()[0]["price"] == FAKE_PRICE
+    assert any("盤中即時" in c.value or "收盤價" in c.value for c in at.caption)
+
+
+def test_關掉自動更新就不連網路(seeded, monkeypatch):
+    db.save_settings({"auto_quotes": 0})
+
+    def should_not_call(symbols):
+        raise AssertionError("關掉後不應該抓股價")
+    monkeypatch.setattr(quotes, "fetch_prices", should_not_call)
+    at = make_app("page_stocks").run()
+    assert not at.exception
+    assert db.get_holdings()[0]["price"] == 1000  # 還是原本手動輸入的
+    assert any("自動更新已關閉" in c.value for c in at.caption)
+
+
+def test_抓不到股價時保留原價並提醒(seeded, monkeypatch):
+    monkeypatch.setattr(quotes, "fetch_prices", lambda s: quotes.QuoteResult(error="沒有網路"))
+    at = make_app("page_stocks").run()
+    assert not at.exception
+    assert db.get_holdings()[0]["price"] == 1000
+    assert any("抓不到股價" in w.value for w in at.warning)

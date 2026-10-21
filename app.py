@@ -18,13 +18,15 @@ Streamlit 的運作方式和一般程式不太一樣：
 import html
 import os
 import re
-from datetime import date
+import time
+from datetime import date, datetime
 
 import altair as alt  # 安裝 streamlit 時會一起裝好，用來畫圖表
 import pandas as pd  # 安裝 streamlit 時會一起裝好，用來顯示表格
 import streamlit as st
 
 import db
+import quotes
 from models.budget import (
     CATEGORIES,
     last_n_months,
@@ -36,6 +38,7 @@ from models.cashflow import monthly_savings, total_debt_payment
 from models.debt import months_left, paid_in_month, payment_this_period, payoff_month
 from models.dca import monthly_withdrawal, project
 from models.precheck import CHECK_ITEMS, check_order
+from models.quotes import is_trading_time
 from models.stocks import CONCENTRATION_LIMIT, analyze, over_concentrated
 from models.trades import TRADE_TYPES, count_day_trades, total_pnl
 
@@ -475,6 +478,63 @@ def delete_button(key: str, label: str = "刪除") -> bool:
     return st.button(label, key=key, type="tertiary", icon=":material/delete:", help="刪除這一筆")
 
 
+# ---------- 股價自動更新 ----------
+
+QUOTE_TTL = 300  # 秒：5 分鐘內重複打開頁面不再連網路，用上一次抓到的
+
+
+@st.cache_data(ttl=QUOTE_TTL, show_spinner=False)
+def cached_quotes(symbols: tuple[str, ...]) -> tuple[quotes.QuoteResult, float]:
+    """抓股價並記住 5 分鐘（st.cache_data：同樣的參數在期限內直接回傳上次的結果，不重抓）。
+
+    回傳 (結果, 抓的時間)。抓的時間要一起記住：5 分鐘內重跑頁面時，顯示的仍是真正抓的那一刻。
+    """
+    return quotes.fetch_prices(list(symbols)), time.time()
+
+
+def refresh_quotes(force: bool = False) -> None:
+    """打開總覽或持股頁時呼叫：自動更新所有持股的現價。
+
+    - 設定頁關掉「自動更新股價」時什麼都不做（force=True 是按了「立即更新」，照樣抓）
+    - 沒有持股就不連網路
+    - 抓不到時保留原本的價格，原因放進 session_state，持股頁會顯示
+    """
+    settings = db.get_settings()
+    if not settings.get("auto_quotes", 1) and not force:
+        return
+    symbols = tuple(sorted({h["symbol"] for h in db.get_holdings()}))
+    if not symbols:
+        return
+    if force:
+        cached_quotes.clear()
+    with st.spinner("更新股價中…"):
+        result, fetched_at = cached_quotes(symbols)
+    st.session_state["quote_result"] = result
+    if result.prices:
+        db.update_prices(result.prices)
+        d = result.quote_date
+        db.save_settings({
+            "quotes_fetched_at": fetched_at,
+            "quotes_date": d.year * 10000 + d.month * 100 + d.day if d else 0.0,
+            "quotes_realtime": 1.0 if result.source == "realtime" else 0.0,
+        })
+
+
+def quote_status() -> str:
+    """現價是什麼時候的，例如「10/21 11:46 盤中即時」「10/20 收盤價」。還沒抓過回傳空字串。"""
+    s = db.get_settings()
+    if not s.get("quotes_fetched_at"):
+        return ""
+    fetched = datetime.fromtimestamp(s["quotes_fetched_at"])
+    n = int(s.get("quotes_date") or 0)
+    quote_day = date(n // 10000, n // 100 % 100, n % 100) if n else fetched.date()
+    if s.get("quotes_realtime") and quote_day == fetched.date():
+        if is_trading_time(fetched):
+            return f"{fetched.month}/{fetched.day} {fetched:%H:%M} 盤中即時（約延遲幾秒）"
+        return f"{quote_day.month}/{quote_day.day} 收盤價"
+    return f"{quote_day.month}/{quote_day.day} 收盤價"
+
+
 # ---------- 頁面：總覽 ----------
 
 def welcome() -> None:
@@ -511,6 +571,7 @@ def page_overview() -> None:
         welcome()
         return
 
+    refresh_quotes()  # 淨資產裡的股票市值要用最新的價格算
     settings = db.get_settings()
     cash = settings["cash_on_hand"]
     analyzed = analyze(db.get_holdings())
@@ -523,6 +584,8 @@ def page_overview() -> None:
     stock_label = "+ 股票市值"
     if total_profit:
         stock_label += f'<span class="sub">損益 {colored_money_html(total_profit)}</span>'
+    if analyzed and quote_status():
+        stock_label += f'<span class="sub" style="color:{MUTED}">{quote_status()}</span>'
     hero_rows = ledger_html([("", "手上現金", money(cash)),
                              ("", stock_label, money(total_value)),
                              ("", "− 負債餘額", money(total_debt))], total=False)
@@ -957,10 +1020,13 @@ def pay_installment(debt_id: int, pay: float) -> None:
 # ---------- 頁面：持股 ----------
 
 def page_stocks() -> None:
-    page_header("持股管理", "不同帳戶的同一檔股票會自動合併計算")
+    page_header("持股管理", "不同帳戶的同一檔股票會自動合併計算，現價自動更新")
 
+    refresh_quotes()
     holdings = db.get_holdings()
     analyzed = analyze(holdings)
+    if holdings:
+        quote_bar()
 
     if analyzed:
         total_value = sum(m["value"] for m in analyzed)
@@ -1041,9 +1107,10 @@ def page_stocks() -> None:
         st.info("還沒有持股")
         return
 
-    # --- 更新現價 ---
+    # --- 手動修改現價：自動抓不到的（例如基金、海外股票）才需要 ---
     with side_col, st.container(key="card_update_price"):
-        card_title("更新現價")
+        card_title("手動修改現價", "自動抓不到的才需要")
+        st.caption("有開自動更新的話，抓得到報價的股票下次更新時會被換成最新價格。")
         with st.form("update_price", border=False):
             symbols = [m["symbol"] for m in analyzed]
             sym = st.selectbox("代號", symbols,
@@ -1071,6 +1138,30 @@ def page_stocks() -> None:
                 if delete_button(f"del_hold_{h['id']}"):
                     db.delete_holding(h["id"])
                     st.rerun()
+
+
+def quote_bar() -> None:
+    """持股頁最上面一行：現價是什麼時候的、立即更新按鈕、抓不到的原因。"""
+    settings = db.get_settings()
+    left, right = st.columns([4, 1], vertical_alignment="center")
+    status = quote_status()
+    if not settings.get("auto_quotes", 1):
+        left.caption("股價自動更新已關閉（可以在設定頁打開），現價是手動輸入的。")
+    elif status:
+        left.caption(f"現價：{status}・每 5 分鐘自動更新，資料來源：證交所、櫃買中心")
+    else:
+        left.caption("現價還沒自動更新過")
+    if right.button("立即更新", icon=":material/refresh:", key="refresh_quotes", width="stretch"):
+        refresh_quotes(force=True)
+        done("股價已更新")
+
+    result = st.session_state.get("quote_result")
+    if result and result.error:
+        when = f"（顯示的是 {status} 的價格）" if status else ""
+        st.warning(f"現在抓不到股價，可能是網路沒有連線{when}。可以稍後按「立即更新」，或手動修改現價。")
+    elif result and result.missing:
+        names = "、".join(result.missing)
+        st.caption(f"查不到報價：{plain(names)}（例如基金、海外股票或代號打錯），這些請手動修改現價。")
 
 
 # ---------- 頁面：下單前檢查 ----------
@@ -1279,6 +1370,16 @@ def page_settings() -> None:
                 note = "已存滿" if fund >= target else f"還差 {money(target - fund)}・已存 {fund / target:.0%}"
                 progress_bar("預備金", fund, target, INK, note)
 
+        # --- 股價自動更新 ---
+        with st.container(key="card_quotes"):
+            card_title("股價自動更新")
+            on = st.toggle("打開總覽、持股頁時自動更新現價", value=bool(s.get("auto_quotes", 1)))
+            st.caption("會連到證交所查詢報價，只送出股票代號（例如 2330），不會送出股數、金額或其他資料。"
+                       "關掉的話程式完全不連網路，現價要自己輸入。")
+            if on != bool(s.get("auto_quotes", 1)):
+                db.save_settings({"auto_quotes": 1.0 if on else 0.0})
+                done("已打開股價自動更新" if on else "已關閉股價自動更新")
+
         # --- 匯出備份 ---
         with st.container(key="card_backup"):
             card_title("匯出 CSV 備份")
@@ -1427,6 +1528,12 @@ with st.sidebar:
     st.markdown('<div style="height:.8rem"></div>', unsafe_allow_html=True)
 quick_add()
 sidebar_summary()
+
+# 用的不是平常那個資料庫時，每一頁最上面都提醒（見 db.is_unusual_db）：
+# 這裡記的資料不會出現在平常打開的程式裡，不提醒的話使用者會以為資料不見了
+if db.is_unusual_db():
+    st.warning(f"目前使用的資料庫是 {short_path(db.DB_PATH)}，不是平常那一個。"
+               "在這裡記的資料，平常打開程式時看不到。", icon=":material/database:")
 
 # 上一次存檔留下的通知（見 done()），顯示一次就拿掉
 if "toast" in st.session_state:
