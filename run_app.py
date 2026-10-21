@@ -14,6 +14,8 @@ exe 的啟動入口：把理財系統開在「自己的視窗」裡，像一般 
 開發時也可以直接執行：python run_app.py（需要先 pip install pywebview）
 """
 
+import base64
+import json
 import logging
 import os
 import socket
@@ -184,14 +186,59 @@ def wait_until_ready(port: int, server: subprocess.Popen, timeout: float = 90) -
 # ---------------------------------------------------------------------------
 
 # 伺服器還在啟動時，視窗先顯示這個畫面，免得使用者以為沒反應
+# 開啟畫面播完、伺服器還沒好時看到的文字（淺色底，和 Oneiroverse 開啟畫面同一個顏色）
 LOADING_HTML = """
 <html><body style="margin:0;height:100vh;display:flex;align-items:center;justify-content:center;
-background:#F6F4EF;color:#1F2633;font-family:'Microsoft JhengHei','PingFang TC',sans-serif;">
+background:#f4f9fc;color:#1C2833;font-family:'Noto Sans TC','Microsoft JhengHei','PingFang TC',sans-serif;">
 <div style="text-align:center">
   <div style="font-size:22px;font-weight:600;margin-bottom:8px">個人理財管理系統</div>
-  <div style="font-size:15px;color:#6B7280">正在啟動，請稍候…</div>
-</div></body></html>
+  <div style="font-size:15px;color:#5F6672">正在啟動，請稍候…</div>
+</div>
+<!--SPLASH-->
+</body></html>
 """
+
+# Oneiroverse 開啟畫面：oneiroverse/ 是 OneiHub/brand-kit 的複本（改那邊再用 sync.ps1 同步，不要直接改）
+SPLASH_LAYERS = ("crescent", "o", "wordmark")
+
+
+def loading_html() -> str:
+    """啟動頁：先播 Oneiroverse 開啟畫面，播完留下「正在啟動」的文字。
+
+    pywebview 用 html= 開的頁面沒有網址，讀不到旁邊的檔案，
+    所以把 splash.js 直接寫進頁面、三張 Logo 圖轉成 data: 網址（把圖片內容編碼進字串裡）。
+    播完會設定 window.ovDone = true，main() 等到這個值和伺服器都準備好才換頁。
+    少了任何一個檔案就只顯示文字，不影響啟動。
+    """
+    folder = resource_path("oneiroverse")
+    try:
+        with open(os.path.join(folder, "splash.js"), encoding="utf-8") as f:
+            script = f.read()
+        images = {}
+        for name in SPLASH_LAYERS:
+            with open(os.path.join(folder, f"{name}.png"), "rb") as f:
+                images[name] = "data:image/png;base64," + base64.b64encode(f.read()).decode("ascii")
+    except OSError:
+        return LOADING_HTML.replace("<!--SPLASH-->", "<script>window.ovDone = true</script>")
+    play = (f"<script>OneiroverseSplash.play({{ images: {json.dumps(images)}, "
+            "onDone: () => { window.ovDone = true } })</script>")
+    # splash.js 的註解裡有「</script>」字樣，直接放進 <script> 會被當成結尾；
+    # 改寫成 <\/（在 JavaScript 字串裡和 </ 一樣）就不會提早結束
+    script = script.replace("</", r"<\/")
+    # data-manual：只載入、不自動播（自動播會去找 splash.js 旁邊的圖，這裡沒有）
+    return LOADING_HTML.replace("<!--SPLASH-->", f"<script data-manual>{script}</script>{play}")
+
+
+def wait_for_splash(window, timeout: float = 10) -> None:
+    """等開啟畫面播完（最多 timeout 秒），伺服器準備好時才不會把動畫切掉一半。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if window.evaluate_js("window.ovDone === true"):
+                return
+        except Exception:  # 頁面還沒載好時 evaluate_js 可能出錯，稍後再試
+            pass
+        time.sleep(0.1)
 
 
 def current_renderer(webview_module) -> str:
@@ -254,7 +301,7 @@ def main() -> None:
 
     window = webview.create_window(
         APP_TITLE,
-        html=LOADING_HTML,
+        html=loading_html(),
         width=1280,
         height=860,
         min_size=(420, 600),
@@ -272,6 +319,7 @@ def main() -> None:
                     "下載安裝「Evergreen Bootstrapper」，裝好後再打開一次。"
                 )
             wait_until_ready(port, server)
+            wait_for_splash(window)
             url = f"http://127.0.0.1:{port}"
             log.info("server ready, loading %s", url)
             window.load_url(url)
