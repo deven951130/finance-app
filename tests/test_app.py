@@ -75,7 +75,7 @@ def seeded(temp_db):
     return temp_db
 
 
-PAGES = ["page_expenses", "page_budgets", "page_fixed", "page_debts", "page_stocks",
+PAGES = ["page_expenses", "page_accounts", "page_budgets", "page_fixed", "page_debts", "page_stocks",
          "page_precheck", "page_trades", "page_dca", "page_settings"]
 
 
@@ -109,14 +109,31 @@ def test_空資料時每一頁也打得開(temp_db, page):
 
 def test_側邊欄記一筆(seeded):
     at = make_app().run()
-    form_amount = next(n for n in at.sidebar.number_input if n.label == "金額")
-    form_amount.set_value(250)
-    at.sidebar.radio[0].set_value("交通")
+    cash_before = db.get_settings()["cash_on_hand"]
+    # 「支出」分頁是第一個表單：金額、類別（主類別 · 細項）、帳戶
+    next(n for n in at.sidebar.number_input if n.label == "金額").set_value(250)
+    next(s for s in at.sidebar.selectbox if s.label == "類別").set_value("交通 · 捷運公車")
     next(b for b in at.sidebar.button if b.label == "記下來").click()
     at.run()
     assert not at.exception
     month = db.get_expenses_in_month(date.today().year, date.today().month)
-    assert any(e["amount"] == 250 and e["category"] == "交通" for e in month)
+    assert any(e["amount"] == 250 and (e["category"], e["subcategory"]) == ("交通", "捷運公車") for e in month)
+    assert db.get_settings()["cash_on_hand"] == cash_before - 250  # 從現金帳戶扣掉了
+
+
+def test_記帳頁記一筆收入_帳戶增加(seeded):
+    at = make_app("page_expenses").run()
+    cash_before = db.get_settings()["cash_on_hand"]
+    # 主畫面的第二個表單是「收入」分頁（第一個是支出）；側邊欄的不算
+    incomes = [n for n in at.main.number_input if n.label == "金額"]
+    incomes[1].set_value(30000)
+    next(s for s in at.main.selectbox if s.label == "類別" and "薪資 · 月薪" in s.options).set_value("薪資 · 月薪")
+    [b for b in at.main.button if b.label == "記下來"][1].click()
+    at.run()
+    assert not at.exception
+    records = db.get_records_in_month(date.today().year, date.today().month)
+    assert any(r["kind"] == "income" and r["amount"] == 30000 for r in records)
+    assert db.get_settings()["cash_on_hand"] == cash_before + 30000
 
 
 def test_修改一筆記帳(seeded):

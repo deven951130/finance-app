@@ -40,6 +40,9 @@ def default_db_path() -> str:
 # 資料庫檔案位置。可以用環境變數 FINANCE_DB 改成別的路徑（例如測試或範例資料）。
 DB_PATH = os.environ.get("FINANCE_DB", default_db_path())
 
+# 第一個帳戶的名字：舊版的「手上現金」會變成這個帳戶
+DEFAULT_ACCOUNT = "現金"
+
 # 設定頁的預設值：預備金目標預設 17000，其他預設 0
 DEFAULT_SETTINGS = {
     "monthly_income": 0.0,     # 每月收入
@@ -146,6 +149,26 @@ def init_db() -> None:
             " value REAL NOT NULL)"
         )
 
+        # 銀行帳戶：每個帳戶一個餘額（2026-10-22 使用者要求「區分銀行帳戶、各自紀錄」）。
+        # 「手上現金」改成所有帳戶餘額的合計（見 get_settings）
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS accounts ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " name TEXT NOT NULL,"
+            " balance REAL NOT NULL DEFAULT 0)"
+        )
+
+        # 舊資料庫升級：CREATE TABLE IF NOT EXISTS 不會幫已經存在的表加欄位，要自己用 ALTER TABLE 補
+        # 記帳：kind 是支出 expense 或收入 income；subcategory 是細項；account_id 是從哪個帳戶進出
+        #   舊的記帳沒有帳戶（NULL），不影響任何帳戶的餘額
+        add_column(conn, "expenses", "kind", "TEXT NOT NULL DEFAULT 'expense'")
+        add_column(conn, "expenses", "subcategory", "TEXT")
+        add_column(conn, "expenses", "account_id", "INTEGER")
+        # 負債：kind 是定期還 installment（每月固定還款）或不限期 open（沒有固定還款，有錢就還）
+        add_column(conn, "debts", "kind", "TEXT NOT NULL DEFAULT 'installment'")
+        # 還款紀錄：從哪個帳戶還的
+        add_column(conn, "debt_payments", "account_id", "INTEGER")
+
         # INSERT OR IGNORE：如果這個 key 已經有值就不覆蓋，只補上缺少的
         for key, value in DEFAULT_SETTINGS.items():
             conn.execute(
@@ -158,24 +181,124 @@ def init_db() -> None:
                 (category,),
             )
 
+        # 第一次有帳戶功能時：把原本的「手上現金」變成一個叫「現金」的帳戶，金額不變
+        if not conn.execute("SELECT 1 FROM accounts LIMIT 1").fetchone():
+            cash = conn.execute("SELECT value FROM settings WHERE key = 'cash_on_hand'").fetchone()
+            conn.execute("INSERT INTO accounts (name, balance) VALUES (?, ?)",
+                         (DEFAULT_ACCOUNT, cash["value"] if cash else 0.0))
+
+
+def add_column(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
+    """表裡沒有這個欄位才加（舊資料庫升級用）。PRAGMA table_info 會列出表的所有欄位。"""
+    columns = [row["name"] for row in conn.execute(f"PRAGMA table_info({table})")]
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
 
 # ---------- 設定 ----------
 
 def get_settings() -> dict[str, float]:
-    """讀取所有設定，回傳 {名稱: 數值}。"""
+    """讀取所有設定，回傳 {名稱: 數值}。
+
+    cash_on_hand（手上現金）不再是自己存的數字，而是所有帳戶餘額的合計，
+    這樣總覽、下單前檢查這些用到「手上現金」的地方都不用改。
+    """
     with get_connection() as conn:
         rows = conn.execute("SELECT key, value FROM settings").fetchall()
-    return {row["key"]: row["value"] for row in rows}
+        total = conn.execute("SELECT COALESCE(SUM(balance), 0) AS t FROM accounts").fetchone()["t"]
+    settings = {row["key"]: row["value"] for row in rows}
+    settings["cash_on_hand"] = total
+    return settings
 
 
 def save_settings(settings: dict[str, float]) -> None:
-    """儲存設定（有就更新，沒有就新增）。"""
+    """儲存設定（有就更新，沒有就新增）。
+
+    給了 cash_on_hand 時，調整第一個帳戶（現金）的餘額，讓所有帳戶合計等於這個數字
+    （範例資料、測試和舊的寫法還是可以直接設定「手上現金」）。
+    """
+    settings = dict(settings)
+    cash = settings.pop("cash_on_hand", None)
     with get_connection() as conn:
         for key, value in settings.items():
             conn.execute(
                 "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
                 (key, value),
             )
+        if cash is not None:
+            first = _default_account_id(conn)
+            others = conn.execute(
+                "SELECT COALESCE(SUM(balance), 0) AS t FROM accounts WHERE id != ?", (first,)
+            ).fetchone()["t"]
+            conn.execute("UPDATE accounts SET balance = ? WHERE id = ?", (cash - others, first))
+
+
+# ---------- 銀行帳戶 ----------
+
+def _default_account_id(conn: sqlite3.Connection) -> int:
+    """第一個帳戶（通常是「現金」）的 id；一個帳戶都沒有時先建一個。"""
+    row = conn.execute("SELECT id FROM accounts ORDER BY id LIMIT 1").fetchone()
+    if row:
+        return row["id"]
+    return conn.execute("INSERT INTO accounts (name, balance) VALUES (?, 0)", (DEFAULT_ACCOUNT,)).lastrowid
+
+
+def default_account_id() -> int:
+    with get_connection() as conn:
+        return _default_account_id(conn)
+
+
+def get_accounts() -> list[dict]:
+    """所有帳戶，照建立順序（第一個是「現金」）。"""
+    with get_connection() as conn:
+        rows = conn.execute("SELECT id, name, balance FROM accounts ORDER BY id").fetchall()
+    return [dict(row) for row in rows]
+
+
+def add_account(name: str, balance: float) -> int:
+    """開一個新帳戶（例如「台新銀行」），balance 是現在的餘額。回傳新帳戶的 id。"""
+    with get_connection() as conn:
+        return conn.execute("INSERT INTO accounts (name, balance) VALUES (?, ?)", (name, balance)).lastrowid
+
+
+def rename_account(account_id: int, name: str) -> None:
+    with get_connection() as conn:
+        conn.execute("UPDATE accounts SET name = ? WHERE id = ?", (name, account_id))
+
+
+def set_account_balance(account_id: int, balance: float) -> None:
+    """直接把餘額改成某個數字（對帳用：和銀行 App 上的數字不一樣時校正）。"""
+    with get_connection() as conn:
+        conn.execute("UPDATE accounts SET balance = ? WHERE id = ?", (balance, account_id))
+
+
+def transfer(from_id: int, to_id: int, amount: float) -> None:
+    """轉帳：一個帳戶扣、另一個帳戶加，在同一個交易裡（不會只扣一邊）。"""
+    if from_id == to_id:
+        raise ValueError("轉出和轉入是同一個帳戶")
+    if amount <= 0:
+        raise ValueError("金額要大於 0")
+    with get_connection() as conn:
+        conn.execute("UPDATE accounts SET balance = balance - ? WHERE id = ?", (amount, from_id))
+        conn.execute("UPDATE accounts SET balance = balance + ? WHERE id = ?", (amount, to_id))
+
+
+def delete_account(account_id: int) -> None:
+    """刪除帳戶。記帳、還款紀錄還在，只是不再屬於這個帳戶。至少要留一個帳戶。"""
+    with get_connection() as conn:
+        if conn.execute("SELECT COUNT(*) AS n FROM accounts").fetchone()["n"] <= 1:
+            raise ValueError("至少要留一個帳戶")
+        conn.execute("UPDATE expenses SET account_id = NULL WHERE account_id = ?", (account_id,))
+        conn.execute("UPDATE debt_payments SET account_id = NULL WHERE account_id = ?", (account_id,))
+        conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
+
+
+def _apply(conn: sqlite3.Connection, account_id: int | None, kind: str, amount: float, sign: int = 1) -> None:
+    """記帳對帳戶餘額的影響：支出扣、收入加。sign = -1 是把這個影響還原（修改、刪除時用）。"""
+    if account_id is None:
+        return
+    delta = amount if kind == "income" else -amount
+    conn.execute("UPDATE accounts SET balance = balance + ? WHERE id = ?", (sign * delta, account_id))
 
 
 # ---------- 每月生活預算 ----------
@@ -199,35 +322,48 @@ def save_budgets(budgets: dict[str, float]) -> None:
 
 # ---------- 記帳 ----------
 
-def add_expense(amount: float, category: str, date_str: str, note: str) -> None:
-    """新增一筆支出。date_str 格式為 'YYYY-MM-DD'。"""
+RECORD_COLUMNS = "id, kind, amount, category, subcategory, date, note, account_id"
+
+
+def add_expense(amount: float, category: str, date_str: str, note: str,
+                subcategory: str | None = None, account_id: int | None = None, kind: str = "expense") -> None:
+    """新增一筆記帳。kind 是 "expense"（支出）或 "income"（收入），date_str 格式為 'YYYY-MM-DD'。
+
+    有選帳戶時，在同一個交易裡更新那個帳戶的餘額（支出扣、收入加）。
+    """
     with get_connection() as conn:
         # 用 ? 當佔位符號，不要自己拼字串，可以避免 SQL injection
         conn.execute(
-            "INSERT INTO expenses (amount, category, date, note) VALUES (?, ?, ?, ?)",
-            (amount, category, date_str, note),
+            "INSERT INTO expenses (kind, amount, category, subcategory, date, note, account_id)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (kind, amount, category, subcategory, date_str, note, account_id),
         )
+        _apply(conn, account_id, kind, amount)
 
 
-def get_expenses_in_month(year: int, month: int) -> list[dict]:
-    """讀取某年某月的所有支出，依日期由新到舊排序。"""
+def get_records_in_month(year: int, month: int) -> list[dict]:
+    """某年某月的所有記帳（支出和收入都有），新的在前面。"""
     # 日期存成 'YYYY-MM-DD'，所以用開頭 'YYYY-MM' 比對就能篩出整個月
     prefix = f"{year:04d}-{month:02d}-%"
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT id, amount, category, date, note FROM expenses"
-            " WHERE date LIKE ? ORDER BY date DESC, id DESC",
+            f"SELECT {RECORD_COLUMNS} FROM expenses WHERE date LIKE ? ORDER BY date DESC, id DESC",
             (prefix,),
         ).fetchall()
     # 把 sqlite3.Row 轉成一般的 dict，給 models 和畫面使用
     return [dict(row) for row in rows]
 
 
+def get_expenses_in_month(year: int, month: int) -> list[dict]:
+    """某年某月的支出（不含收入），新的在前面。預算、「還能花多少」都只看支出。"""
+    return [r for r in get_records_in_month(year, month) if r["kind"] == "expense"]
+
+
 def get_expenses_since(date_str: str) -> list[dict]:
-    """讀取某一天（含）以後的所有支出，給「近幾個月趨勢」用。"""
+    """某一天（含）以後的所有支出（不含收入），給「近幾個月趨勢」用。"""
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT id, amount, category, date, note FROM expenses WHERE date >= ?"
+            f"SELECT {RECORD_COLUMNS} FROM expenses WHERE date >= ? AND kind = 'expense'"
             " ORDER BY date, id",
             (date_str,),
         ).fetchall()
@@ -243,18 +379,31 @@ def get_expense_months() -> list[str]:
     return [row["ym"] for row in rows]
 
 
-def update_expense(expense_id: int, amount: float, category: str, date_str: str, note: str) -> None:
-    """修改一筆支出（記錯金額、類別、日期時用，不用刪掉重記）。"""
+def update_expense(expense_id: int, amount: float, category: str, date_str: str, note: str,
+                   subcategory: str | None = None, account_id: int | None = None, kind: str | None = None) -> None:
+    """修改一筆記帳（記錯金額、類別、日期、帳戶時用，不用刪掉重記）。
+
+    帳戶餘額：先把舊的那筆對帳戶的影響還原，再套用新的（換了帳戶也對得上）。
+    kind 沒給就維持原本的支出／收入。
+    """
     with get_connection() as conn:
+        old = conn.execute("SELECT kind, amount, account_id FROM expenses WHERE id = ?", (expense_id,)).fetchone()
+        kind = kind or old["kind"]
+        _apply(conn, old["account_id"], old["kind"], old["amount"], sign=-1)
         conn.execute(
-            "UPDATE expenses SET amount = ?, category = ?, date = ?, note = ? WHERE id = ?",
-            (amount, category, date_str, note, expense_id),
+            "UPDATE expenses SET kind = ?, amount = ?, category = ?, subcategory = ?, date = ?, note = ?,"
+            " account_id = ? WHERE id = ?",
+            (kind, amount, category, subcategory, date_str, note, account_id, expense_id),
         )
+        _apply(conn, account_id, kind, amount)
 
 
 def delete_expense(expense_id: int) -> None:
-    """刪除一筆支出（記錯時用）。"""
+    """刪除一筆記帳（記錯時用），並把它對帳戶餘額的影響還原。"""
     with get_connection() as conn:
+        old = conn.execute("SELECT kind, amount, account_id FROM expenses WHERE id = ?", (expense_id,)).fetchone()
+        if old:
+            _apply(conn, old["account_id"], old["kind"], old["amount"], sign=-1)
         conn.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
 
 
@@ -287,20 +436,22 @@ def delete_fixed_expense(fixed_id: int) -> None:
 # ---------- 負債 ----------
 
 def get_debts() -> list[dict]:
-    """讀取所有負債。"""
+    """讀取所有負債。kind 是 "installment"（定期還）或 "open"（不限期）。"""
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT id, name, remaining, monthly_payment FROM debts ORDER BY id"
+            "SELECT id, name, remaining, monthly_payment, kind FROM debts ORDER BY id"
         ).fetchall()
     return [dict(row) for row in rows]
 
 
-def add_debt(name: str, remaining: float, monthly_payment: float) -> None:
-    """新增一筆負債。"""
+def add_debt(name: str, remaining: float, monthly_payment: float, kind: str = "installment") -> None:
+    """新增一筆負債。不限期（open）的負債沒有每月還款，monthly_payment 存 0。"""
+    if kind == "open":
+        monthly_payment = 0.0
     with get_connection() as conn:
         conn.execute(
-            "INSERT INTO debts (name, remaining, monthly_payment) VALUES (?, ?, ?)",
-            (name, remaining, monthly_payment),
+            "INSERT INTO debts (name, remaining, monthly_payment, kind) VALUES (?, ?, ?, ?)",
+            (name, remaining, monthly_payment, kind),
         )
 
 
@@ -315,47 +466,51 @@ def get_debt_payments(debt_id: int) -> list[dict]:
     """某筆負債的還款紀錄，新的在前面。"""
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT id, date, amount FROM debt_payments WHERE debt_id = ?"
+            "SELECT id, date, amount, account_id FROM debt_payments WHERE debt_id = ?"
             " ORDER BY date DESC, id DESC",
             (debt_id,),
         ).fetchall()
     return [dict(row) for row in rows]
 
 
-def pay_debt_installment(debt_id: int, date_str: str | None = None) -> float:
-    """「已還一期」：剩餘金額和手上現金同時扣掉這一期的還款，並記一筆還款紀錄，回傳扣了多少。
+def pay_debt(debt_id: int, amount: float, account_id: int | None = None, date_str: str | None = None) -> float:
+    """還一筆錢：負債剩餘金額和帳戶餘額同時扣掉，並記一筆還款紀錄，回傳實際還了多少。
 
     三件事放在同一個 with 區塊裡，這叫「交易（transaction）」：
     要嘛全部成功，要嘛中途出錯全部不改，不會只扣了一邊。
-    現金不夠時會丟出 ValueError，什麼都不改。
-    date_str 是還款日期（'YYYY-MM-DD'），沒給就是今天。
+    - 還的錢比剩下的多時，只還剩下的（不會還成負數）
+    - 帳戶餘額不夠時丟出 ValueError，什麼都不改
+    account_id 沒給就用第一個帳戶（現金）；date_str 沒給就是今天。
     """
     date_str = date_str or date.today().isoformat()
     with get_connection() as conn:
-        debt = conn.execute(
-            "SELECT remaining, monthly_payment FROM debts WHERE id = ?", (debt_id,)
-        ).fetchone()
-        cash = conn.execute(
-            "SELECT value FROM settings WHERE key = 'cash_on_hand'"
-        ).fetchone()["value"]
-
-        pay = payment_this_period(debt["remaining"], debt["monthly_payment"])
+        if account_id is None:
+            account_id = _default_account_id(conn)
+        debt = conn.execute("SELECT remaining FROM debts WHERE id = ?", (debt_id,)).fetchone()
+        account = conn.execute("SELECT name, balance FROM accounts WHERE id = ?", (account_id,)).fetchone()
+        pay = min(amount, debt["remaining"])
         if pay <= 0:
-            raise ValueError("這筆負債已經還清了")
-        if pay > cash:
-            raise ValueError(f"手上現金 {cash:,.0f} 不夠還這一期 {pay:,.0f}")
+            raise ValueError("這筆負債已經還清了" if debt["remaining"] <= 0 else "金額要大於 0")
+        if pay > account["balance"]:
+            raise ValueError(f"「{account['name']}」餘額 {account['balance']:,.0f} 不夠還 {pay:,.0f}")
 
+        conn.execute("UPDATE debts SET remaining = remaining - ? WHERE id = ?", (pay, debt_id))
+        conn.execute("UPDATE accounts SET balance = balance - ? WHERE id = ?", (pay, account_id))
         conn.execute(
-            "UPDATE debts SET remaining = remaining - ? WHERE id = ?", (pay, debt_id)
-        )
-        conn.execute(
-            "UPDATE settings SET value = value - ? WHERE key = 'cash_on_hand'", (pay,)
-        )
-        conn.execute(
-            "INSERT INTO debt_payments (debt_id, date, amount) VALUES (?, ?, ?)",
-            (debt_id, date_str, pay),
+            "INSERT INTO debt_payments (debt_id, date, amount, account_id) VALUES (?, ?, ?, ?)",
+            (debt_id, date_str, pay, account_id),
         )
     return pay
+
+
+def pay_debt_installment(debt_id: int, date_str: str | None = None, account_id: int | None = None) -> float:
+    """「已還一期」（定期還的負債）：還這一期的金額（最後一期只還剩下的）。"""
+    with get_connection() as conn:
+        debt = conn.execute("SELECT remaining, monthly_payment FROM debts WHERE id = ?", (debt_id,)).fetchone()
+    pay = payment_this_period(debt["remaining"], debt["monthly_payment"])
+    if pay <= 0:
+        raise ValueError("這筆負債已經還清了")
+    return pay_debt(debt_id, pay, account_id, date_str)
 
 
 # ---------- 持股 ----------
@@ -461,7 +616,7 @@ def get_networth_history() -> list[dict]:
 # ---------- 匯出 CSV 備份 ----------
 
 # 要備份的資料表
-EXPORT_TABLES = ["settings", "budgets", "expenses", "fixed_expenses",
+EXPORT_TABLES = ["settings", "accounts", "budgets", "expenses", "fixed_expenses",
                  "debts", "debt_payments", "holdings", "trades", "networth_history"]
 
 
@@ -587,6 +742,9 @@ def is_empty() -> bool:
         for table in ["expenses", "fixed_expenses", "debts", "holdings", "trades"]:
             if conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
                 return False
+        # 開了第二個帳戶，或帳戶裡有錢，也算開始使用了
+        if conn.execute("SELECT 1 FROM accounts WHERE balance != 0 OR id != (SELECT MIN(id) FROM accounts) LIMIT 1").fetchone():
+            return False
         for row in conn.execute("SELECT key, value FROM settings"):
             if row["value"] != DEFAULT_SETTINGS.get(row["key"], 0.0):
                 return False
