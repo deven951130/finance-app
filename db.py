@@ -20,6 +20,7 @@ from datetime import date, datetime
 
 from models.budget import CATEGORIES
 from models.debt import payment_this_period
+from models.fees import avg_after_buy, realized_pnl, trade_summary
 
 
 
@@ -180,6 +181,28 @@ def init_db() -> None:
                 "INSERT OR IGNORE INTO budgets (category, amount) VALUES (?, 0)",
                 (category,),
             )
+
+        # 券商：持股的 account 欄就是券商名稱。手續費折扣和最低手續費每家不同，所以存在這裡
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS brokers ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " name TEXT NOT NULL UNIQUE,"
+            " discount REAL NOT NULL DEFAULT 1.0,"   # 1 = 不打折，0.28 = 2.8 折
+            " min_fee REAL NOT NULL DEFAULT 20)"      # 最低手續費（一般 20 元）
+        )
+        # 交易：買賣的細節（股數、價格、手續費、稅、券商、帳戶）。舊的手動紀錄這些欄位是 NULL
+        add_column(conn, "trades", "side", "TEXT")          # buy 或 sell；舊紀錄沒有
+        add_column(conn, "trades", "shares", "REAL")
+        add_column(conn, "trades", "price", "REAL")
+        add_column(conn, "trades", "amount", "REAL")        # 成交金額 = 股數 × 價格
+        add_column(conn, "trades", "fee", "REAL")           # 手續費
+        add_column(conn, "trades", "tax", "REAL")           # 證券交易稅（只有賣出）
+        add_column(conn, "trades", "broker", "TEXT")
+        add_column(conn, "trades", "account_id", "INTEGER") # 從哪個銀行帳戶付／收錢
+        # 舊的持股已經有券商名稱，補進券商表（不覆蓋已經設定過的折扣）
+        conn.execute(
+            "INSERT OR IGNORE INTO brokers (name) SELECT DISTINCT account FROM holdings"
+        )
 
         # 第一次有帳戶功能時：把原本的「手上現金」變成一個叫「現金」的帳戶，金額不變
         if not conn.execute("SELECT 1 FROM accounts LIMIT 1").fetchone():
@@ -529,6 +552,7 @@ def add_holding(name: str, symbol: str, account: str, shares: float,
                 avg_price: float, price: float) -> None:
     """新增一筆持股。同代號的其他帳戶現價也一起更新，確保合併計算時一致。"""
     with get_connection() as conn:
+        _ensure_broker(conn, account)
         conn.execute(
             "INSERT INTO holdings (name, symbol, account, shares, avg_price, price)"
             " VALUES (?, ?, ?, ?, ?, ?)",
@@ -568,14 +592,45 @@ def delete_holding(holding_id: int) -> None:
         conn.execute("DELETE FROM holdings WHERE id = ?", (holding_id,))
 
 
+# ---------- 券商 ----------
+
+def _ensure_broker(conn: sqlite3.Connection, name: str) -> None:
+    """券商不存在就建立（預設不打折、最低 20 元）。已經存在不會覆蓋它的折扣。"""
+    conn.execute("INSERT OR IGNORE INTO brokers (name) VALUES (?)", (name,))
+
+
+def get_brokers() -> list[dict]:
+    """所有券商，照建立順序。"""
+    with get_connection() as conn:
+        rows = conn.execute("SELECT id, name, discount, min_fee FROM brokers ORDER BY id").fetchall()
+    return [dict(row) for row in rows]
+
+
+def save_broker(name: str, discount: float, min_fee: float) -> None:
+    """設定券商的手續費折扣和最低手續費（例如 2.8 折 = discount 0.28）。"""
+    name = name.strip()
+    if not name:
+        raise ValueError("要填券商名稱")
+    if not 0 < discount <= 1:
+        raise ValueError("折扣要在 0 到 1 之間（2.8 折填 0.28）")
+    if min_fee < 0:
+        raise ValueError("最低手續費不能是負數")
+    with get_connection() as conn:
+        _ensure_broker(conn, name)
+        conn.execute("UPDATE brokers SET discount = ?, min_fee = ? WHERE name = ?",
+                     (discount, min_fee, name))
+
+
 # ---------- 交易紀錄 ----------
 
+TRADE_COLUMNS = "id, date, symbol, type, pnl, note, side, shares, price, amount, fee, tax, broker, account_id"
+
+
 def get_trades() -> list[dict]:
-    """讀取所有交易紀錄，新的在前面。"""
+    """讀取所有交易紀錄，新的在前面。舊的手動紀錄買賣欄位是 None。"""
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT id, date, symbol, type, pnl, note FROM trades"
-            " ORDER BY date DESC, id DESC"
+            f"SELECT {TRADE_COLUMNS} FROM trades ORDER BY date DESC, id DESC"
         ).fetchall()
     return [dict(row) for row in rows]
 
@@ -589,9 +644,95 @@ def add_trade(date_str: str, symbol: str, trade_type: str, pnl: float, note: str
         )
 
 
-def delete_trade(trade_id: int) -> None:
-    """刪除一筆交易紀錄。"""
+def execute_trade(side: str, symbol: str, broker: str, shares: float, price: float,
+                  account_id: int | None = None, date_str: str | None = None,
+                  name: str | None = None, day_trade: bool = False) -> dict:
+    """下一筆買進（side="buy"）或賣出（side="sell"），同時更新持股、帳戶餘額和交易紀錄。
+
+    和 pay_debt 一樣放在同一個 with 區塊：全部成功或全部不改。
+    - 買進：帳戶扣「成交金額 + 手續費」，持股加股數，均價用 avg_after_buy 算（含手續費）。
+      帳戶餘額不夠時丟出 ValueError，什麼都不改。
+    - 賣出：持股不夠時丟出 ValueError；帳戶加「成交金額 − 手續費 − 稅」，持股扣股數（扣到 0 就刪列），
+      實現損益寫進 trades.pnl。
+    name 是新持股的名稱（用 quotes.lookup 查到的），沒給就用代號。
+    回傳 fees.trade_summary 的結果，多一個 pnl（均價不知道時是 None）。
+    """
+    from models.quotes import normalize_symbol  # 同 update_prices：放在函式裡避免 db 一載入就依賴股價模組
+
+    if side not in ("buy", "sell"):
+        raise ValueError("買賣類型只能是 buy 或 sell")
+    if shares <= 0 or price <= 0:
+        raise ValueError("股數和價格都要大於 0")
+    broker = broker.strip()
+    if not broker:
+        raise ValueError("要填券商")
+    symbol = normalize_symbol(symbol)
+    if not symbol:
+        raise ValueError("要填股票代號")
+    date_str = date_str or date.today().isoformat()
+
     with get_connection() as conn:
+        _ensure_broker(conn, broker)
+        b = conn.execute("SELECT discount, min_fee FROM brokers WHERE name = ?", (broker,)).fetchone()
+        if account_id is None:
+            account_id = _default_account_id(conn)
+        account = conn.execute("SELECT name, balance FROM accounts WHERE id = ?", (account_id,)).fetchone()
+
+        s = trade_summary(side, symbol, shares, price, b["discount"], b["min_fee"], day_trade)
+        holding = conn.execute(
+            "SELECT id, name, shares, avg_price FROM holdings WHERE symbol = ? AND account = ?",
+            (symbol, broker),
+        ).fetchone()
+        old_shares = holding["shares"] if holding else 0.0
+        # 均價 0 代表「不知道」（存 0 因為欄位是 NOT NULL）
+        old_avg = (holding["avg_price"] or None) if holding else None
+
+        if side == "buy":
+            cost = -s["cash"]  # 成交金額 + 手續費
+            if cost > account["balance"]:
+                raise ValueError(f"「{account['name']}」餘額 {account['balance']:,.0f} 不夠買，需要 {cost:,.0f}")
+            new_avg = avg_after_buy(old_shares, old_avg, shares, cost)
+            conn.execute("UPDATE accounts SET balance = balance - ? WHERE id = ?", (cost, account_id))
+            if holding:
+                conn.execute("UPDATE holdings SET shares = ?, avg_price = ? WHERE id = ?",
+                             (old_shares + shares, new_avg or 0.0, holding["id"]))
+            else:
+                conn.execute(
+                    "INSERT INTO holdings (name, symbol, account, shares, avg_price, price)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (name or symbol, symbol, broker, shares, new_avg or 0.0, price),
+                )
+            conn.execute("UPDATE holdings SET price = ? WHERE symbol = ?", (price, symbol))
+            pnl = 0.0  # 買進沒有實現損益
+        else:
+            if holding is None or old_shares < shares:
+                raise ValueError(f"「{broker}」的 {symbol} 只有 {old_shares:g} 股，不夠賣 {shares:g} 股")
+            proceeds = s["cash"]  # 成交金額 − 手續費 − 稅
+            pnl = realized_pnl(proceeds, old_avg, shares)
+            conn.execute("UPDATE accounts SET balance = balance + ? WHERE id = ?", (proceeds, account_id))
+            left = old_shares - shares
+            if left <= 1e-9:  # 浮點數比較留一點誤差，賣光就刪列
+                conn.execute("DELETE FROM holdings WHERE id = ?", (holding["id"],))
+            else:
+                conn.execute("UPDATE holdings SET shares = ? WHERE id = ?", (left, holding["id"]))
+
+        trade_type = "當沖" if day_trade else ("買進" if side == "buy" else "賣出")
+        # pnl 欄位是 NOT NULL，均價不知道時先存 0；畫面用 None 判斷要不要顯示
+        cursor = conn.execute(
+            "INSERT INTO trades (date, symbol, type, pnl, note, side, shares, price, amount, fee, tax,"
+            " broker, account_id) VALUES (?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?)",
+            (date_str, symbol, trade_type, pnl or 0.0, side, shares, price, s["amount"], s["fee"],
+             s["tax"], broker, account_id),
+        )
+    return {**s, "pnl": pnl, "trade_id": cursor.lastrowid}
+
+
+def delete_trade(trade_id: int) -> None:
+    """刪除一筆手動記的交易紀錄。買賣紀錄（side 有值）已經動過帳戶和持股，不能只刪紀錄，會對不起來。"""
+    with get_connection() as conn:
+        row = conn.execute("SELECT side FROM trades WHERE id = ?", (trade_id,)).fetchone()
+        if row and row["side"]:
+            raise ValueError("買賣紀錄不能直接刪除（帳戶和持股已經跟著改了）")
         conn.execute("DELETE FROM trades WHERE id = ?", (trade_id,))
 
 
@@ -617,7 +758,7 @@ def get_networth_history() -> list[dict]:
 
 # 要備份的資料表
 EXPORT_TABLES = ["settings", "accounts", "budgets", "expenses", "fixed_expenses",
-                 "debts", "debt_payments", "holdings", "trades", "networth_history"]
+                 "debts", "debt_payments", "holdings", "brokers", "trades", "networth_history"]
 
 
 def export_csv_zip() -> bytes:

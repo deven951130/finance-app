@@ -44,6 +44,8 @@ def no_network(monkeypatch):
         return quotes.QuoteResult(prices={s: FAKE_PRICE for s in symbols}, quote_date=date.today(),
                                   source="realtime")
     monkeypatch.setattr(quotes, "fetch_prices", fake_fetch)
+    # 新增持股、下單會用 lookup 查名稱和現價，也要換成假資料
+    monkeypatch.setattr(quotes, "lookup", lambda symbol: {"symbol": symbol, "name": f"測試{symbol}", "price": FAKE_PRICE})
     # 版本檢查也不連網路：預設當作「不用更新」
     monkeypatch.setattr(update_check, "check", lambda: None)
     st.cache_data.clear()
@@ -270,3 +272,63 @@ def test_帳戶頁開戶與轉帳(seeded):
     assert not at.exception
     balances = {a["name"]: a["balance"] for a in db.get_accounts()}
     assert balances["台新"] == 25000
+
+
+def test_下單買進_帳戶扣款_持股增加(temp_db):
+    db.save_settings({"cash_on_hand": 1_000_000})
+    db.add_holding("台積電", "2330", "永豐", 1000, 100, 100)
+
+    at = make_app("page_trades").run()
+    at.radio(key="order_side").set_value("買進").run()
+    at.text_input(key="order_symbol").input("2330").run()
+    at.selectbox(key="order_broker").set_value("永豐").run()
+    at.number_input(key="order_shares").set_value(500).run()
+    at.number_input(key="order_price").set_value(100).run()
+    at.button(key="order_submit").click().run()
+
+    assert not at.exception
+    trade = db.get_trades()[0]
+    assert trade["side"] == "buy" and trade["shares"] == 500
+    # 500 × 100 = 50000，手續費 floor(50000 × 0.001425) = 71
+    assert db.get_settings()["cash_on_hand"] == pytest.approx(1_000_000 - 50071)
+    assert [h["shares"] for h in db.get_holdings()] == [1500]
+
+
+def test_下單賣出超過持股_提醒且什麼都不改(temp_db):
+    db.save_settings({"cash_on_hand": 1_000_000})
+    db.add_holding("台積電", "2330", "永豐", 1000, 100, 100)
+
+    at = make_app("page_trades").run()
+    at.radio(key="order_side").set_value("賣出").run()
+    at.text_input(key="order_symbol").input("2330").run()
+    at.selectbox(key="order_broker").set_value("永豐").run()
+    at.number_input(key="order_shares").set_value(2000).run()
+    at.number_input(key="order_price").set_value(100).run()
+    at.button(key="order_submit").click().run()
+
+    assert not at.exception
+    assert any("不夠賣" in w.value for w in at.warning)
+    assert db.get_trades() == []
+    assert [h["shares"] for h in db.get_holdings()] == [1000]
+
+
+def test_新增持股只填代號和券商_名稱和現價自動查(temp_db):
+    db.save_broker("永豐", 1.0, 20)  # 先有券商，選單才有選項
+    at = make_app("page_stocks").run()
+
+    def widget(kind, label):
+        # 依標籤找元件：表單裡的元件沒有 key，用文字找比用位置找穩
+        return next(w for w in getattr(at, kind) if w.label.startswith(label))
+
+    # 表單裡的值要一起送出：先全部設定，中間不能 run()，不然還沒送出的值會被丟掉
+    widget("text_input", "代號").set_value("2330")
+    widget("selectbox", "券商").set_value("永豐")
+    widget("number_input", "股數").set_value(1000)
+    next(b for b in at.button if b.label == "新增").click()
+    at.run()
+
+    assert not at.exception
+    h = db.get_holdings()[0]
+    assert (h["symbol"], h["account"], h["name"]) == ("2330", "永豐", "測試2330")
+    assert h["price"] == FAKE_PRICE
+    assert h["avg_price"] == 0  # 沒填均價 = 不知道

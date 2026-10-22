@@ -100,6 +100,11 @@ def analyze(holdings: list[dict]) -> list[dict]:
     return merged
 
 
+def sum_known_profit(analyzed: list[dict]) -> float:
+    """總損益：只加有算出來的個股。均價沒填的不算進去（不然會把它的市值當成全部賺來的）。"""
+    return sum(m["profit"] for m in analyzed if m["profit"] is not None)
+
+
 def over_concentrated(analyzed: list[dict]) -> list[dict]:
     """找出占總市值超過 40% 的個股。"""
     return [m for m in analyzed if m["weight"] > CONCENTRATION_LIMIT]

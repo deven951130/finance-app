@@ -13,6 +13,7 @@ from models.stocks import (
     merge_by_symbol,
     over_concentrated,
     rise_needed_pct,
+    sum_known_profit,
 )
 
 # 賣出時要扣的比例：手續費 0.1425% + 交易稅 0.3% = 0.4425%
@@ -108,3 +109,12 @@ def test_剛好四成不警告():
         make_holding("CCC", "A", 3, 100, 100),
     ]
     assert over_concentrated(analyze(holdings)) == []
+
+
+def test_總損益_沒填均價的不算進去():
+    analyzed = analyze([
+        make_holding("2330", "永豐", 1000, 100, 120),   # 賺 20000
+        make_holding("0050", "元大", 1000, 0, 50),       # 均價沒填，損益不知道
+    ])
+
+    assert sum_known_profit(analyzed) == pytest.approx(20000)

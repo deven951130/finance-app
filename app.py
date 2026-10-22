@@ -44,7 +44,8 @@ from models.dca import monthly_withdrawal, project
 from models.precheck import CHECK_ITEMS, check_order
 from models.quotes import is_trading_time
 from version import APP_VERSION
-from models.stocks import CONCENTRATION_LIMIT, analyze, over_concentrated
+from models.fees import trade_summary
+from models.stocks import CONCENTRATION_LIMIT, analyze, over_concentrated, sum_known_profit
 from models.trades import TRADE_TYPES, count_day_trades, total_pnl
 
 # 頁面基本設定（必須是第一個 st. 指令）
@@ -272,6 +273,11 @@ div[data-testid="stFormSubmitButton"] button {{ min-width: 120px; }}
 
 
 # ---------- 小工具：格式化與共用畫面元件 ----------
+
+def nan_if_none(x: float | None) -> float:
+    """None 轉成 NaN。pandas 表格裡 NaN 才能用 na_rep 顯示成「—」，None 會讓格式化出錯。"""
+    return float("nan") if x is None else x
+
 
 def money(x: float) -> str:
     """把數字格式化成金額字串，例如 12345 -> '12,345 元'。
@@ -633,7 +639,7 @@ def page_overview() -> None:
     cash = settings["cash_on_hand"]
     analyzed = analyze(db.get_holdings())
     total_value = sum(m["value"] for m in analyzed)
-    total_profit = sum(m["profit"] for m in analyzed)
+    total_profit = sum_known_profit(analyzed)  # 均價沒填的不算
     debts = db.get_debts()
     total_debt = sum(d["remaining"] for d in debts)
 
@@ -1209,8 +1215,9 @@ def page_stocks() -> None:
 
     if analyzed:
         total_value = sum(m["value"] for m in analyzed)
-        total_profit = sum(m["profit"] for m in analyzed)
-        cost = total_value - total_profit
+        total_profit = sum_known_profit(analyzed)
+        # 報酬率只用均價有填的那幾檔的成本算
+        cost = sum(m["cost"] for m in analyzed if m["cost"] is not None)
         m1, m2, m3 = summary_strip("stocks", 3)
         m1.metric("總市值", money(total_value))
         # delta_color="inverse"：正數紅、負數綠（台股習慣）
@@ -1221,16 +1228,17 @@ def page_stocks() -> None:
 
         with st.container(key="card_holdings"):
             card_title("持股總覽", "同代號已合併")
+            # 均價沒填時，損益、報酬率是 None：轉成 NaN，表格裡用 na_rep 顯示「—」
             table = pd.DataFrame([{
                 "名稱": m["name"],
                 "代號": m["symbol"],
                 "帳戶": "、".join(m["accounts"]),
                 "股數": m["shares"],
-                "均價": m["avg_price"],
+                "均價": nan_if_none(m["avg_price"]),
                 "現價": m["price"],
                 "市值": m["value"],
-                "損益": m["profit"],
-                "報酬率%": m["profit_pct"],
+                "損益": nan_if_none(m["profit"]),
+                "報酬率%": nan_if_none(m["profit_pct"]),
                 "占比%": m["weight"] * 100,
                 # 沒虧損時是 None，先轉成字串，空字串在表格裡就是空白
                 "回本價": "" if m["breakeven"] is None else f"{m['breakeven']:,.2f}",
@@ -1245,7 +1253,7 @@ def page_stocks() -> None:
                     "股數": "{:,.0f}", "均價": "{:,.2f}", "現價": "{:,.2f}",
                     "市值": "{:,.0f}", "損益": "{:+,.0f}", "報酬率%": "{:+.2f}",
                     "占比%": "{:.1f}",
-                })
+                }, na_rep="—")
             )
             st.dataframe(styled, hide_index=True)
             over = over_concentrated(analyzed)
@@ -1262,25 +1270,62 @@ def page_stocks() -> None:
             show_donut(weights, "股票", "市值", money(total_value))
 
     with st.container(key="card_add_holding"):
-        card_title("新增持股")
+        card_title("新增持股", "只填代號和券商，名稱和現價自動查；均價不知道就留 0")
         with st.form("add_holding", clear_on_submit=True, border=False):
-            col1, col2, col3 = st.columns(3)
-            name = col1.text_input("名稱（例如 台積電）")
-            symbol = col2.text_input("代號（例如 2330）")
-            account = col3.text_input("帳戶（例如 富邦）")
-            col4, col5, col6 = st.columns(3)
-            shares = col4.number_input("股數", min_value=0.0, step=1.0)
-            avg_price = col5.number_input("均價", min_value=0.0, step=0.1)
-            price = col6.number_input("現價", min_value=0.0, step=0.1)
+            col1, col2 = st.columns(2)
+            symbol = col1.text_input("代號（例如 2330）")
+            # accept_new_options：可以選既有的券商，也可以直接打新名字
+            broker = col2.selectbox("券商", [b["name"] for b in db.get_brokers()],
+                                    index=None, accept_new_options=True,
+                                    placeholder="選或輸入券商（例如 永豐）")
+            col3, col4 = st.columns(2)
+            shares = col3.number_input("股數", min_value=0.0, step=1.0)
+            avg_price = col4.number_input("均價（選填，0 = 不知道）", min_value=0.0, step=0.1)
+            # 查不到的時候（基金、海外股票、打錯）才要自己填
+            col5, col6 = st.columns(2)
+            name = col5.text_input("名稱（查不到才要填）")
+            price = col6.number_input("現價（查不到才要填）", min_value=0.0, step=0.1)
             if st.form_submit_button("新增", type="primary", icon=":material/add:"):
-                name, symbol, account = name.strip(), symbol.strip(), account.strip()
-                if not (name and symbol and account):
-                    st.warning("名稱、代號、帳戶都要填")
-                elif shares <= 0 or avg_price <= 0 or price <= 0:
-                    st.warning("股數、均價、現價都要大於 0")
+                symbol, broker = quotes.normalize_symbol(symbol or ""), (broker or "").strip()
+                if not (symbol and broker):
+                    st.warning("代號、券商都要填")
+                elif shares <= 0:
+                    st.warning("股數要大於 0")
                 else:
-                    db.add_holding(name, symbol, account, shares, avg_price, price)
-                    done(f"已新增：{plain(name)}（{plain(account)}）")  # 重跑讓上面的總覽表馬上更新
+                    with st.spinner("查詢股票名稱和現價…"):
+                        info = quotes.lookup(symbol)
+                    name = (info["name"] if info else name.strip())
+                    price = (info["price"] if info else price)
+                    if not (name and price > 0):
+                        st.warning(f"查不到「{symbol}」的名稱和現價，請填寫下面的名稱和現價再新增一次")
+                    else:
+                        db.add_holding(name, symbol, broker, shares, avg_price, price)
+                        done(f"已新增：{plain(name)}（{plain(broker)}）")  # 重跑讓上面的總覽表馬上更新
+
+    # --- 券商手續費：買賣時自動算，折扣和最低手續費每家不同 ---
+    with st.container(key="card_brokers"):
+        card_title("券商手續費", "2.8 折就填 2.8，不打折填 10")
+        brokers = db.get_brokers()
+        if not brokers:
+            st.info("新增持股或下單後，券商會出現在這裡")
+        else:
+            st.dataframe(pd.DataFrame([{
+                "券商": b["name"],
+                "折數": round(b["discount"] * 10, 2),
+                "最低手續費": b["min_fee"],
+            } for b in brokers]), hide_index=True)
+            with st.form("save_broker", border=False):
+                col1, col2, col3 = st.columns(3)
+                broker_name = col1.selectbox("券商", [b["name"] for b in brokers])
+                folds = col2.number_input("折數（10 = 不打折）", min_value=0.1, max_value=10.0,
+                                          value=10.0, step=0.1)
+                min_fee = col3.number_input("最低手續費（元）", min_value=0.0, value=20.0, step=1.0)
+                if st.form_submit_button("儲存", type="primary", icon=":material/save:"):
+                    try:
+                        db.save_broker(broker_name, round(folds / 10, 4), min_fee)
+                        done(f"已儲存 {plain(broker_name)} 的手續費")
+                    except ValueError as e:
+                        st.warning(str(e))
 
     if not holdings:
         st.info("還沒有持股")
@@ -1312,7 +1357,8 @@ def page_stocks() -> None:
             col1, col2, col3, col4 = st.columns(widths, vertical_alignment="center")
             col1.write(f"**{plain(h['name'])}**（{plain(h['symbol'])}）")
             col2.write(plain(h["account"]))
-            col3.write(f"{h['shares']:,.0f} 股 @ {h['avg_price']:,.2f}")
+            avg = f"{h['avg_price']:,.2f}" if h["avg_price"] else "未填"  # 0 = 均價不知道
+            col3.write(f"{h['shares']:,.0f} 股 @ {avg}")
             with col4:
                 if delete_button(f"del_hold_{h['id']}"):
                     db.delete_holding(h["id"])
@@ -1399,8 +1445,74 @@ def page_precheck() -> None:
             st.markdown(f"緊急預備金 {money(fund)} / {money(target)}　{status}",
                         unsafe_allow_html=True)
             losing = [f"{plain(m['name'])}（{plain(m['symbol'])}）"
-                      for m in analyze(db.get_holdings()) if m["profit"] < 0]
+                      for m in analyze(db.get_holdings()) if m["profit"] is not None and m["profit"] < 0]
             st.markdown("虧損中的個股：" + ("、".join(losing) if losing else "沒有"))
+
+
+def trade_detail(t: dict) -> str:
+    """買賣紀錄在列表裡的說明：股數、價格、手續費、稅、券商。手動紀錄沒有這些，回傳空字串。"""
+    if not t.get("side"):
+        return ""
+    text = f"{t['shares']:,.0f} 股 @ {t['price']:,.2f}・手續費 {t['fee']:,.0f}"
+    if t["tax"]:
+        text += f"・稅 {t['tax']:,.0f}"
+    return f"{text}・{t['broker']}"
+
+
+def order_form(today: date) -> None:
+    """買進／賣出。不用 st.form，才能一邊填一邊看手續費、稅和帳戶增減的預覽。"""
+    brokers = {b["name"]: b for b in db.get_brokers()}
+    with st.container(key="card_order"):
+        card_title("買進／賣出", "會自動扣或加帳戶餘額，也會更新持股")
+        side = st.radio("方向", ["買進", "賣出"], horizontal=True, key="order_side")
+        is_buy = side == "買進"
+        col1, col2, col3 = st.columns(3)
+        symbol = col1.text_input("代號（例如 2330）", key="order_symbol")
+        # accept_new_options：可以選既有的券商，也可以直接打新名字（會自動建立）
+        broker = col2.selectbox("券商", list(brokers), index=None, accept_new_options=True,
+                                placeholder="選或輸入券商", key="order_broker")
+        account_id = account_select("帳戶（付款或收錢）", key="order_account")
+        col4, col5, col6 = st.columns(3)
+        shares = col4.number_input("股數", min_value=0.0, step=1.0, key="order_shares")
+        price = col5.number_input("成交價", min_value=0.0, step=0.1, key="order_price")
+        trade_date = col6.date_input("日期", value=today, key="order_date")
+        day_trade = False
+        if not is_buy:
+            day_trade = st.checkbox("當沖（稅率較低，會記成當沖）", key="order_day")
+
+        # 預覽：用這家券商的折扣和最低手續費算，和下單後實際扣的一樣
+        info = brokers.get(broker or "", {"discount": 1.0, "min_fee": 20.0})
+        if shares > 0 and price > 0:
+            s = trade_summary("buy" if is_buy else "sell", symbol or "", shares, price,
+                              info["discount"], info["min_fee"], day_trade)
+            if is_buy:
+                ledger([("", "成交金額", money(s["amount"])),
+                        ("", "+ 手續費", money(s["fee"])),
+                        ("", "帳戶扣掉", money(-s["cash"]))])
+            else:
+                ledger([("", "成交金額", money(s["amount"])),
+                        ("", "− 手續費", money(s["fee"])),
+                        ("", "− 證券交易稅", money(s["tax"])),
+                        ("", "帳戶加回", money(s["cash"]))])
+
+        if st.button("下單", type="primary", icon=":material/check:", key="order_submit"):
+            code = quotes.normalize_symbol(symbol or "")
+            if not (code and broker and shares > 0 and price > 0):
+                st.warning("代號、券商、股數、成交價都要填，股數和價格要大於 0")
+                return
+            try:
+                # 新持股要知道名稱：查不到就先用代號當名稱（之後可以在持股頁改成正確的）
+                name = None
+                if is_buy and (code, broker) not in {(h["symbol"], h["account"]) for h in db.get_holdings()}:
+                    with st.spinner("查詢股票名稱…"):
+                        found = quotes.lookup(code)
+                    name = found["name"] if found else None
+                db.execute_trade("buy" if is_buy else "sell", code, broker, shares, price, account_id,
+                                 trade_date.isoformat(), name=name, day_trade=day_trade)
+            except ValueError as e:
+                st.warning(str(e))
+                return
+            done(f"已記下：{side} {plain(code)} {shares:,.0f} 股")
 
 
 # ---------- 頁面：交易紀錄 ----------
@@ -1417,7 +1529,9 @@ def page_trades() -> None:
     m3.metric("本月當沖", f"{count_day_trades(trades, today.year, today.month)} 次",
               help="當沖次數越少越好")
 
-    with st.expander("新增交易紀錄", icon=":material/add:", expanded=not trades):
+    order_form(today)
+
+    with st.expander("手動記一筆（當沖、備註用）", icon=":material/add:", expanded=not trades):
         with st.form("add_trade", clear_on_submit=True, border=False):
             col1, col2, col3 = st.columns(3)
             trade_date = col1.date_input("日期", value=today)
@@ -1450,11 +1564,14 @@ def page_trades() -> None:
             col3.markdown(chip(t["type"], type_colors.get(t["type"], MUTED)),
                           unsafe_allow_html=True)
             col4.markdown(colored_money(t["pnl"]))
-            col5.write(plain(t["note"] or ""))
+            col5.write(plain(trade_detail(t) or t["note"] or ""))
             with col6:
                 if delete_button(f"del_trade_{t['id']}"):
-                    db.delete_trade(t["id"])
-                    st.rerun()
+                    try:
+                        db.delete_trade(t["id"])
+                        st.rerun()
+                    except ValueError as e:  # 買賣紀錄不能直接刪，會跟帳戶、持股對不起來
+                        st.warning(str(e))
 
 
 # ---------- 頁面：定期定額試算 ----------
