@@ -30,7 +30,7 @@
 python -m venv .venv && source .venv/bin/activate   # Windows：.venv\Scripts\activate
 pip install -r requirements.txt
 streamlit run app.py          # http://localhost:8501，第一次會自動建立 data/finance.db
-pytest                        # 目前 107 passed（含 tests/test_app.py 的畫面測試；測試不會連網路）
+pytest                        # 目前 168 passed（含 tests/test_app.py 的畫面測試；測試不會連網路）
 
 # 用虛構範例資料啟動（不會動到 finance.db）
 python seed_example.py
@@ -54,11 +54,12 @@ FINANCE_DB=data/example.db streamlit run app.py
 ### 各檔案職責
 
 - `app.py`（約 1100 行）：由上到下是「配色與 CSS（`inject_css`）→ 共用小工具（`money`、`ledger`、`summary_strip`、`notices`、`plain`、`done`、`budget_bar`、`show_donut`、`welcome`…）→ 各頁 `page_*()` 函式 → 側邊欄 → 主程式（`NAV` 清單 + `st.navigation`）」。新增頁面：寫一個 `page_xxx()`，再加進檔尾的 `NAV`。外觀是「存摺」風格：一排數字用 `summary_strip()`、自律提醒用 `notices()`、明細用 `ledger()`。
-- `db.py`：`DB_PATH` 預設是 `data/finance.db`；視窗版（`run_app.py` 設定環境變數，或 PyInstaller 的 `sys.frozen`）是 `~/FinanceApp/finance.db`；環境變數 `FINANCE_DB` 可覆蓋。`init_db()` 用 `CREATE TABLE IF NOT EXISTS` 建 9 張表：`settings`（key/value）、`budgets`、`expenses`、`fixed_expenses`、`debts`、`debt_payments`（還款紀錄）、`holdings`、`trades`、`networth_history`（每天的淨資產）。也負責每日自動備份（`auto_backup`，資料庫旁的 `backups/`，留 14 份）和還原（`restore_backup`，還原前先另存）。
+- `db.py`：`DB_PATH` 預設是 `data/finance.db`；視窗版（`run_app.py` 設定環境變數，或 PyInstaller 的 `sys.frozen`）是 `~/FinanceApp/finance.db`；環境變數 `FINANCE_DB` 可覆蓋。`init_db()` 用 `CREATE TABLE IF NOT EXISTS` 建 11 張表：`settings`（key/value）、`accounts`（銀行帳戶，`cash_on_hand` = 帳戶合計）、`budgets`、`expenses`（含收入）、`fixed_expenses`、`debts`、`debt_payments`（還款紀錄）、`holdings`（`account` 欄是券商名稱，`avg_price` 0 = 不知道）、`brokers`（券商手續費折扣、最低手續費）、`trades`、`networth_history`（每天的淨資產）。舊資料庫缺的欄位用 `add_column()` 補。買賣股票用 `execute_trade()`：帳戶、持股、交易紀錄在同一個交易裡一起改；`trade_preview()` 只算不寫。也負責每日自動備份（`auto_backup`，資料庫旁的 `backups/`，留 14 份）和還原（`restore_backup`，還原前先另存）。
 - `models/budget.py`：預算類別 `CATEGORIES`（唯一定義處）、篩選某月、本月還能花多少。
 - `models/cashflow.py`：每月可存 = 收入 − 固定支出 − 負債還款 − 生活預算。
 - `models/debt.py`：這期還多少、剩幾期、預計還清月份（假設下一期在下個月繳）。
-- `models/stocks.py`：同代號跨帳戶合併（加權平均均價）、市值、損益、占比、40% 集中警告、回本價。
+- `models/stocks.py`：同代號跨券商合併（加權平均均價）、市值、損益、占比、40% 集中警告、回本價。沒填均價的個股 `profit` 是 None，總損益用 `profit_totals()` 只加有值的。
+- `models/fees.py`：手續費（× 券商折扣，最低手續費）、證券交易稅（股票 0.3%、ETF 0.1%、當沖 0.15%）、加碼後均價、實現損益。
 - `models/precheck.py`：下單前檢查，`CHECK_ITEMS` 五個勾選項，回傳 `(可不可以下單, 原因清單)`。
 - `models/trades.py`：交易類型、本月當沖次數、累計損益。
 - `models/dca.py`：定期定額複利試算、4% 法則。
@@ -120,8 +121,8 @@ FINANCE_DB=data/example.db streamlit run app.py
 - ✅ v1 實用功能（2026-10-21）：首次使用引導、側邊欄記一筆、記帳月份切換與修改、6 個月趨勢、淨資產變化、還款紀錄、每日自動備份與還原；安裝版改用官方嵌入式 Python
 
 下一步建議的待辦（完整清單和理由見 `docs/開發紀錄.md` 的「待辦」）：
-1. ETF 賣出交易稅是 0.1%（目前一律用 0.3%），手續費最低 20 元
-2. 手上現金不會隨記帳／交易自動更新
+1. 回本價（`models/stocks.breakeven_price`）還是用不打折的手續費和 0.3% 稅，可以改成照券商折扣和 ETF 稅率
+2. 刪除交易紀錄不會把持股和帳戶改回去
 3. 記帳類別寫死在 `models/budget.py`，可以考慮讓使用者自訂
 
 開始做任何一項之前，先跟使用者確認要做哪一項。

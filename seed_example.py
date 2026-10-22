@@ -50,20 +50,26 @@ def main() -> None:
         "auto_quotes": 0,
     })
 
+    # 第二個帳戶：範例銀行（第一個「現金」帳戶的錢是上面的 cash_on_hand）
+    bank = db.add_account("範例銀行", 52000)
+    cash_id = db.default_account_id()
+
     # 每月生活預算
     db.save_budgets({"吃飯": 7000, "約會禮物": 2500, "交通": 1500, "其他": 2000})
 
-    # 本月記帳
-    for amount, category, d, note in [
-        (85, "吃飯", 1, "早餐"),
-        (160, "吃飯", 1, "午餐便當"),
-        (1280, "約會禮物", 2, "電影＋晚餐"),
-        (1200, "交通", 3, "捷運月票"),
-        (220, "吃飯", 4, "拉麵"),
-        (450, "其他", 5, "生活用品"),
-        (130, "吃飯", 6, "午餐"),
+    # 本月記帳（主類別、細項、從哪個帳戶付；會從帳戶扣錢）
+    for amount, category, sub, d, note in [
+        (85, "吃飯", "早餐", 1, ""),
+        (160, "吃飯", "午餐", 1, "便當"),
+        (1280, "約會禮物", "約會", 2, "電影＋晚餐"),
+        (1200, "交通", "捷運公車", 3, "月票"),
+        (220, "吃飯", "晚餐", 4, "拉麵"),
+        (450, "其他", "其他", 5, "生活用品"),
+        (130, "吃飯", "午餐", 6, ""),
     ]:
-        db.add_expense(amount, category, day(d), note)
+        db.add_expense(amount, category, day(d), note, subcategory=sub, account_id=cash_id)
+    # 本月收入：月薪進銀行
+    db.add_expense(42000, "薪資", day(5), "", subcategory="月薪", account_id=bank, kind="income")
 
     # 前 5 個月的記帳（給記帳頁的「最近 6 個月」趨勢圖用）。每個月金額稍微不同，其中一個月超支
     month_start = today.replace(day=1)
@@ -97,12 +103,18 @@ def main() -> None:
     db.add_holding("元大台灣50", "0050", "A 證券", 400, 160, 175)  # 占比超過 40%，示範警告
     db.add_holding("範例虧損股", "9999", "B 證券", 1000, 48, 39)
 
+    # 券商手續費：A 證券 2.8 折、B 證券 6 折（虛構）
+    db.save_broker("A 證券", 0.28, 1)
+    db.save_broker("B 證券", 0.6, 20)
+
     # 交易紀錄（含一筆當沖，示範總覽頁的警告）
     last_month = (today.replace(day=1) - timedelta(days=1)).replace(day=15).isoformat()
     db.add_trade(last_month, "2330 台積電", "買進", 0, "定期定額")
     db.add_trade(day(2), "0050 元大台灣50", "買進", 0, "")
     db.add_trade(day(4), "9999 範例虧損股", "當沖", -1200, "示範用：衝動當沖")
     db.add_trade(day(5), "2330 台積電", "賣出", 3500, "部分停利")
+    # 用「買進」表單買的（會從範例銀行扣錢、加到 A 證券的 0050、記下手續費）
+    db.execute_trade("buy", "0050", "A 證券", 100, 175, bank, day(6), note="定期定額")
 
     # 過去 6 個月的淨資產紀錄（每兩週一筆，慢慢往上，中間有一次股票下跌），示範總覽的「淨資產變化」
     for i, value in enumerate([88000, 93500, 97000, 104000, 101500, 109000, 113500,
