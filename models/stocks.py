@@ -103,3 +103,14 @@ def analyze(holdings: list[dict]) -> list[dict]:
 def over_concentrated(analyzed: list[dict]) -> list[dict]:
     """找出占總市值超過 40% 的個股。"""
     return [m for m in analyzed if m["weight"] > CONCENTRATION_LIMIT]
+
+
+def profit_totals(analyzed: list[dict]) -> tuple[float, float, int]:
+    """總損益只加「知道成本」的個股：回傳 (總損益, 這些個股的總成本, 沒填均價的檔數)。
+
+    沒填均價的個股不知道賺賠多少，硬算成 0 元成本會讓總損益等於整個市值，所以跳過，
+    畫面另外提醒「有幾檔沒算進去」。
+    """
+    known = [m for m in analyzed if m["profit"] is not None]
+    return (sum(m["profit"] for m in known), sum(m["cost"] for m in known),
+            len(analyzed) - len(known))
