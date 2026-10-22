@@ -58,6 +58,21 @@ def parse_mis(data: dict) -> tuple[dict[str, float], date | None]:
     return prices, quote_date
 
 
+def parse_names(data) -> dict[str, str]:
+    """從行情資料取出 {代號: 股票名稱}（新增持股時只填代號，名稱從這裡來）。
+
+    支援三種格式：MIS 即時行情（c 代號、n 簡稱）、證交所每日（Code、Name）、櫃買中心每日（SecuritiesCompanyCode、CompanyName）。
+    """
+    rows = data.get("msgArray", []) if isinstance(data, dict) else data
+    names = {}
+    for row in rows:
+        code = row.get("c") or row.get("Code") or row.get("SecuritiesCompanyCode") or ""
+        name = row.get("n") or row.get("Name") or row.get("CompanyName") or ""
+        if normalize_symbol(code) and name.strip():
+            names[normalize_symbol(code)] = name.strip()
+    return names
+
+
 def roc_to_date(text: str) -> date | None:
     """民國年日期轉成 date，例如 '1151020' → 2026-10-20（民國 115 年 = 西元 2026 年）。"""
     text = str(text).strip()

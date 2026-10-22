@@ -15,7 +15,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from datetime import date
 
-from models.quotes import normalize_symbol, parse_mis, parse_tpex_daily, parse_twse_daily
+from models.quotes import normalize_symbol, parse_mis, parse_names, parse_tpex_daily, parse_twse_daily
 
 MIS_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
 TWSE_DAILY_URL = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
@@ -42,11 +42,43 @@ def _get_json(url: str):
         return json.loads(response.read().decode("utf-8"))
 
 
-def fetch_mis(symbols: list[str]) -> tuple[dict[str, float], date | None]:
-    """問 MIS 即時行情。不知道每檔是上市（tse）還是上櫃（otc），所以兩種都問，查不到的 MIS 會自動略過。"""
+def _mis_raw(symbols: list[str]) -> dict:
+    """MIS 即時行情的原始資料。不知道每檔是上市（tse）還是上櫃（otc），所以兩種都問，查不到的 MIS 會自動略過。"""
     channels = "|".join(f"{market}_{s}.tw" for s in symbols for market in ("tse", "otc"))
     url = f"{MIS_URL}?ex_ch={urllib.parse.quote(channels, safe='|_.')}&json=1&delay=0"
-    return parse_mis(_get_json(url))
+    return _get_json(url)
+
+
+def fetch_mis(symbols: list[str]) -> tuple[dict[str, float], date | None]:
+    """問 MIS 即時行情，回傳 ({代號: 價格}, 行情日期)。"""
+    return parse_mis(_mis_raw(symbols))
+
+
+def lookup(symbol: str) -> dict | None:
+    """新增持股時用：只給代號，查出名稱和現價，回傳 {"symbol", "name", "price"}；查不到或連不上回傳 None。
+
+    先問 MIS；MIS 連不上或查不到，再找官方每日收盤價的清單（上市 + 上櫃，有名稱）。
+    """
+    code = normalize_symbol(symbol)
+    if not code:
+        return None
+    try:
+        data = _mis_raw([code])
+        name = parse_names(data).get(code)
+        price = parse_mis(data)[0].get(code)
+        if name and price:
+            return {"symbol": code, "name": name, "price": price}
+    except (OSError, ValueError):
+        pass
+    try:
+        for url, parse in ((TWSE_DAILY_URL, parse_twse_daily), (TPEX_DAILY_URL, parse_tpex_daily)):
+            rows = _get_json(url)
+            name, price = parse_names(rows).get(code), parse(rows)[0].get(code)
+            if name and price:
+                return {"symbol": code, "name": name, "price": price}
+    except (OSError, ValueError):
+        pass
+    return None
 
 
 def fetch_daily() -> tuple[dict[str, float], date | None]:
