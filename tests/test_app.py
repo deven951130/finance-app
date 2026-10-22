@@ -44,6 +44,8 @@ def no_network(monkeypatch):
         return quotes.QuoteResult(prices={s: FAKE_PRICE for s in symbols}, quote_date=date.today(),
                                   source="realtime")
     monkeypatch.setattr(quotes, "fetch_prices", fake_fetch)
+    # 新增持股、第一次買進時查名稱：一律回傳假的名稱和價格
+    monkeypatch.setattr(quotes, "lookup", lambda s: {"symbol": s, "name": f"測試股{s}", "price": FAKE_PRICE})
     # 版本檢查也不連網路：預設當作「不用更新」
     monkeypatch.setattr(update_check, "check", lambda: None)
     st.cache_data.clear()
@@ -270,3 +272,68 @@ def test_帳戶頁開戶與轉帳(seeded):
     assert not at.exception
     balances = {a["name"]: a["balance"] for a in db.get_accounts()}
     assert balances["台新"] == 25000
+
+
+# ---------- 持股只填代號、買賣連動帳戶 ----------
+
+def test_新增持股只填代號券商股數_名稱現價自動查(seeded):
+    at = make_app("page_stocks").run()
+    next(t for t in at.text_input if t.label.startswith("代號")).set_value("1111")
+    next(s for s in at.selectbox if s.label == "券商").set_value("＋ 新的券商")
+    next(t for t in at.text_input if t.label.startswith("新的券商名稱")).set_value("B 證券")
+    next(n for n in at.number_input if n.label == "股數").set_value(100)
+    next(b for b in at.button if b.label == "新增").click()
+    at.run()
+    assert not at.exception
+    h = next(h for h in db.get_holdings() if h["symbol"] == "1111")
+    assert (h["name"], h["account"], h["shares"], h["avg_price"], h["price"]) == ("測試股1111", "B 證券", 100, 0, FAKE_PRICE)
+    assert "B 證券" in [b["name"] for b in db.get_brokers()]
+    # 沒填均價的那檔損益顯示「—」，頁面照常
+    at = make_app("page_stocks").run()
+    assert not at.exception
+
+
+def test_新增持股查不到報價時要自己填(seeded, monkeypatch):
+    monkeypatch.setattr(quotes, "lookup", lambda s: None)
+    at = make_app("page_stocks").run()
+    next(t for t in at.text_input if t.label.startswith("代號")).set_value("ABCD")
+    next(n for n in at.number_input if n.label == "股數").set_value(10)
+    next(b for b in at.button if b.label == "新增").click()
+    at.run()
+    assert not at.exception
+    assert any("查不到 ABCD" in w.value for w in at.warning)
+    assert not any(h["symbol"] == "ABCD" for h in db.get_holdings())
+
+
+def test_交易頁買進_帳戶扣錢持股增加(seeded):
+    cash_before = db.get_settings()["cash_on_hand"]
+    at = make_app("page_trades").run()
+    next(t for t in at.text_input if t.label.startswith("代號")).set_value("2330")
+    next(n for n in at.number_input if n.label == "股數").set_value(10)
+    next(n for n in at.number_input if n.label == "成交價").set_value(1000)
+    at.run()
+    # 送出前先看到預覽：10 股 × 1000 = 10000，手續費 14.25 → 最低 20
+    assert any("10,020 元" in m.value for m in at.markdown)
+    next(b for b in at.button if b.label == "確認買進").click()
+    at.run()
+    assert not at.exception
+    assert db.get_settings()["cash_on_hand"] == cash_before - 10020
+    assert db.get_holdings()[0]["shares"] == 20  # seeded 原本就有 10 股（A 證券）
+    assert db.get_trades()[0]["fee"] == 20
+
+
+def test_交易頁賣出_帳戶加錢記損益(seeded):
+    cash_before = db.get_settings()["cash_on_hand"]
+    at = make_app("page_trades").run()
+    at.radio(key="tr_side").set_value("賣出")
+    at.run()
+    next(n for n in at.number_input if n.label == "股數").set_value(10)
+    next(n for n in at.number_input if n.label == "成交價").set_value(1000)
+    at.run()
+    next(b for b in at.button if b.label == "確認賣出").click()
+    at.run()
+    assert not at.exception
+    # 10000 − 手續費 20 − 稅 30 = 9950；成本 10 股 × 900 = 9000 → 賺 950
+    assert db.get_settings()["cash_on_hand"] == cash_before + 9950
+    assert db.get_holdings() == []
+    assert db.get_trades()[0]["pnl"] == 950
