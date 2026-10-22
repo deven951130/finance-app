@@ -1070,90 +1070,130 @@ def page_accounts() -> None:
 # ---------- 頁面：負債 ----------
 
 def page_debts() -> None:
-    page_header("負債追蹤", "每還一期按一下，看著餘額慢慢變少")
+    page_header("負債追蹤", "定期還的每期按一下；不限期的有錢就還一筆，看著餘額慢慢變少")
 
     debts = db.get_debts()
-    cash = db.get_settings()["cash_on_hand"]
+    installment = [d for d in debts if d["kind"] != "open"]
     m1, m2, m3 = summary_strip("debts", 3)
     m1.metric("負債餘額", money(sum(d["remaining"] for d in debts)))
-    m2.metric("每月還款", money(total_debt_payment(debts)))
-    m3.metric("手上現金", money(cash), help="按「已還一期」會從這裡扣")
+    m2.metric("每月固定還款", money(total_debt_payment(installment)), help="只算「定期還」的負債")
+    m3.metric("帳戶存款合計", money(db.get_settings()["cash_on_hand"]))
 
     list_col, form_col = st.columns([3, 2])
 
     with form_col, st.container(key="card_add_debt"):
         card_title("新增負債")
         with st.form("add_debt", clear_on_submit=True, border=False):
-            name = st.text_input("名稱（例如 學貸、信用卡分期）")
+            name = st.text_input("名稱（例如 學貸、信用卡分期、跟朋友借）")
+            kind = st.radio("類型", ["定期還", "不限期"], horizontal=True,
+                            captions=["每月固定還一筆", "沒有固定還款，有錢就還"])
             remaining = st.number_input("剩餘金額", min_value=0.0, step=1000.0, format="%.0f")
-            monthly = st.number_input("每月還款", min_value=0.0, step=100.0, format="%.0f")
+            monthly = st.number_input("每月還款（定期還才要填）", min_value=0.0, step=100.0, format="%.0f")
             if st.form_submit_button("新增", type="primary", icon=":material/add:"):
                 name = name.strip()
                 if not name:
                     st.warning("請輸入名稱")
-                elif remaining <= 0 or monthly <= 0:
-                    st.warning("剩餘金額和每月還款都要大於 0")
+                elif remaining <= 0:
+                    st.warning("剩餘金額要大於 0")
+                elif kind == "定期還" and monthly <= 0:
+                    st.warning("定期還的負債要填每月還款")
                 else:
-                    db.add_debt(name, remaining, monthly)
+                    db.add_debt(name, remaining, monthly, "open" if kind == "不限期" else "installment")
                     done(f"已新增：{plain(name)}")  # 重跑讓左邊的清單和上面的數字馬上更新
 
     with list_col:
         if not debts:
             st.info("沒有負債")
             return
+        # 所有還款按鈕都從這個帳戶扣（每張卡片各放一個選單太佔位置）
+        account_id = account_select("還款從哪個帳戶扣", key="debt_pay_account")
 
         today = date.today()
         for d in debts:
             with st.container(key=f"card_debt_{d['id']}"):
-                ym = payoff_month(d["remaining"], d["monthly_payment"], today)
-                if ym is None:
-                    status = chip("已還清", GOLD_TEXT)
-                else:
-                    n = months_left(d["remaining"], d["monthly_payment"])
-                    status = chip(f"還剩 {n} 期・預計 {ym[0]} 年 {ym[1]} 月還清", INK)
-                # 名稱是自己輸入的，用 html.escape 把 < > & 換成安全的寫法，避免畫面壞掉
-                st.markdown(f'<div class="card-title">{html.escape(d["name"])}　{status}</div>',
-                            unsafe_allow_html=True)
-                col1, col2 = st.columns(2)
-                col1.markdown(big_number("剩餘金額", money(d["remaining"])), unsafe_allow_html=True)
-                col2.markdown(big_number("每月還款", money(d["monthly_payment"])), unsafe_allow_html=True)
-
                 payments = db.get_debt_payments(d["id"])
-                b1, b2 = st.columns([3, 1])
-                if ym is not None:
-                    pay = payment_this_period(d["remaining"], d["monthly_payment"])
-                    with b1:
-                        if paid_in_month(payments, today.year, today.month):
-                            # 這個月已經按過了：不直接給「已還一期」按鈕，避免手滑按兩次、多扣一期。
-                            # 真的要提前多還一期（例如一次繳兩期），點開再確認一次
-                            st.markdown(chip(f"本月已還 {payments[0]['date'][5:].replace('-', '/')}", INK),
-                                        unsafe_allow_html=True)
-                            with st.popover("提前再還一期", icon=":material/more_time:"):
-                                st.write(f"這個月已經還過了。確定要再還一期 {money(pay)} 嗎？")
-                                if st.button("確定再還一期", key=f"pay_again_{d['id']}", type="primary"):
-                                    pay_installment(d["id"], pay)
-                        elif st.button(f"已還一期（{money(pay)}）", key=f"pay_{d['id']}",
-                                       type="primary", icon=":material/check:"):
-                            pay_installment(d["id"], pay)
-                with b2:
-                    if delete_button(f"del_debt_{d['id']}"):
-                        db.delete_debt(d["id"])
-                        st.rerun()
-
+                paid_total = sum(p["amount"] for p in payments)
+                if d["kind"] == "open":
+                    open_debt_card(d, payments, paid_total, account_id)
+                else:
+                    installment_card(d, payments, account_id, today)
                 if payments:
-                    with st.expander(f"還款紀錄（{len(payments)} 筆，共 {money(sum(p['amount'] for p in payments))}）"):
-                        ledger_rows = [("", p["date"], money(p["amount"])) for p in payments[:24]]
+                    names = account_names()
+                    with st.expander(f"還款紀錄（{len(payments)} 筆，共 {money(paid_total)}）"):
+                        ledger_rows = [("", f'{p["date"]}<span class="sub">{html.escape(names.get(p["account_id"], ""))}</span>',
+                                        money(p["amount"])) for p in payments[:24]]
                         st.markdown(ledger_html(ledger_rows, total=False), unsafe_allow_html=True)
 
 
-def pay_installment(debt_id: int, pay: float) -> None:
-    """按下「已還一期」：扣負債、扣現金、記一筆還款紀錄。"""
+def installment_card(d: dict, payments: list[dict], account_id: int, today: date) -> None:
+    """定期還的負債：還剩幾期、預計哪個月還清、「已還一期」按鈕。"""
+    ym = payoff_month(d["remaining"], d["monthly_payment"], today)
+    if ym is None:
+        status = chip("已還清", GOLD_TEXT)
+    else:
+        n = months_left(d["remaining"], d["monthly_payment"])
+        status = chip(f"定期還・還剩 {n} 期・預計 {ym[0]} 年 {ym[1]} 月還清", INK)
+    # 名稱是自己輸入的，用 html.escape 把 < > & 換成安全的寫法，避免畫面壞掉
+    st.markdown(f'<div class="card-title">{html.escape(d["name"])}　{status}</div>', unsafe_allow_html=True)
+    col1, col2 = st.columns(2)
+    col1.markdown(big_number("剩餘金額", money(d["remaining"])), unsafe_allow_html=True)
+    col2.markdown(big_number("每月還款", money(d["monthly_payment"])), unsafe_allow_html=True)
+
+    b1, b2 = st.columns([3, 1])
+    if ym is not None:
+        pay = payment_this_period(d["remaining"], d["monthly_payment"])
+        with b1:
+            if paid_in_month(payments, today.year, today.month):
+                # 這個月已經按過了：不直接給「已還一期」按鈕，避免手滑按兩次、多扣一期。
+                # 真的要提前多還一期（例如一次繳兩期），點開再確認一次
+                st.markdown(chip(f"本月已還 {payments[0]['date'][5:].replace('-', '/')}", INK),
+                            unsafe_allow_html=True)
+                with st.popover("提前再還一期", icon=":material/more_time:"):
+                    st.write(f"這個月已經還過了。確定要再還一期 {money(pay)} 嗎？")
+                    if st.button("確定再還一期", key=f"pay_again_{d['id']}", type="primary"):
+                        pay_debt(d["id"], pay, account_id)
+            elif st.button(f"已還一期（{money(pay)}）", key=f"pay_{d['id']}",
+                           type="primary", icon=":material/check:"):
+                pay_debt(d["id"], pay, account_id)
+    with b2:
+        if delete_button(f"del_debt_{d['id']}"):
+            db.delete_debt(d["id"])
+            st.rerun()
+
+
+def open_debt_card(d: dict, payments: list[dict], paid_total: float, account_id: int) -> None:
+    """不限期的負債：沒有每月還款，有錢就「還一筆」，金額自己填。"""
+    status = chip("已還清", GOLD_TEXT) if d["remaining"] <= 0 else chip("不限期", MUTED)
+    st.markdown(f'<div class="card-title">{html.escape(d["name"])}　{status}</div>', unsafe_allow_html=True)
+    col1, col2 = st.columns(2)
+    col1.markdown(big_number("剩餘金額", money(d["remaining"])), unsafe_allow_html=True)
+    col2.markdown(big_number("已經還了", money(paid_total)), unsafe_allow_html=True)
+
+    b1, b2 = st.columns([3, 1])
+    if d["remaining"] > 0:
+        with b1, st.popover("還一筆", icon=":material/payments:"):
+            with st.form(f"pay_open_{d['id']}", border=False):
+                amount = st.number_input("這次還多少", min_value=0.0, max_value=float(d["remaining"]),
+                                         step=100.0, format="%.0f")
+                if st.form_submit_button("還款", type="primary", icon=":material/check:"):
+                    if amount <= 0:
+                        st.warning("金額要大於 0")
+                    else:
+                        pay_debt(d["id"], amount, account_id)
+    with b2:
+        if delete_button(f"del_debt_{d['id']}"):
+            db.delete_debt(d["id"])
+            st.rerun()
+
+
+def pay_debt(debt_id: int, amount: float, account_id: int) -> None:
+    """還款：扣負債、扣選到的帳戶、記一筆還款紀錄（在 db 的同一個交易裡）。"""
     try:
-        db.pay_debt_installment(debt_id)
-    except ValueError as e:  # 現金不夠時，db 會丟出 ValueError，什麼都不扣
+        paid = db.pay_debt(debt_id, amount, account_id)
+    except ValueError as e:  # 帳戶餘額不夠時，db 會丟出 ValueError，什麼都不扣
         st.warning(str(e))
     else:  # 沒有出錯才會走到這裡（try 的 else）
-        done(f"已還一期 {money(pay)}，手上現金也扣掉了")
+        done(f"已還 {money(paid)}，「{plain(account_names()[account_id])}」也扣掉了")
 
 
 # ---------- 頁面：持股 ----------

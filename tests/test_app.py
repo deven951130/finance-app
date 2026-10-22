@@ -237,3 +237,36 @@ def test_版本夠新時照常使用(seeded, monkeypatch):
     at = make_app().run()
     assert not at.exception
     assert any("淨資產" in m.value for m in at.markdown)
+
+
+def test_不限期負債還一筆_負債和帳戶都扣(seeded):
+    db.add_debt("跟朋友借", 8000, 0, kind="open")
+    debt = next(d for d in db.get_debts() if d["kind"] == "open")
+    cash_before = db.get_settings()["cash_on_hand"]
+    at = make_app("page_debts").run()
+    assert not at.exception
+    next(n for n in at.number_input if n.label == "這次還多少").set_value(1500)
+    next(b for b in at.button if b.label == "還款").click()
+    at.run()
+    assert not at.exception
+    assert next(d for d in db.get_debts() if d["id"] == debt["id"])["remaining"] == 6500
+    assert db.get_settings()["cash_on_hand"] == cash_before - 1500
+
+
+def test_帳戶頁開戶與轉帳(seeded):
+    at = make_app("page_accounts").run()
+    assert not at.exception
+    next(t for t in at.text_input if t.label.startswith("名稱（例如 台新")).set_value("台新")
+    next(n for n in at.number_input if n.label == "現在的餘額").set_value(20000)
+    next(b for b in at.button if b.label == "開戶").click()
+    at.run()
+    assert not at.exception
+    assert [a["name"] for a in db.get_accounts()] == ["現金", "台新"]
+    # 開了第二個帳戶才有轉帳表單：預設從現金轉到台新
+    at = make_app("page_accounts").run()
+    next(n for n in at.number_input if n.label == "金額").set_value(5000)
+    next(b for b in at.button if b.label == "轉帳").click()
+    at.run()
+    assert not at.exception
+    balances = {a["name"]: a["balance"] for a in db.get_accounts()}
+    assert balances["台新"] == 25000
