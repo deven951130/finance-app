@@ -1,5 +1,5 @@
 """
-個人理財管理系統：Streamlit 主程式。
+OniPulsar 星脈流轉（原名「個人理財」）：Streamlit 主程式。
 
 執行方式：streamlit run app.py
 
@@ -45,7 +45,7 @@ from models.stocks import CONCENTRATION_LIMIT, analyze, over_concentrated
 from models.trades import TRADE_TYPES, count_day_trades, total_pnl
 
 # 頁面基本設定（必須是第一個 st. 指令）
-st.set_page_config(page_title="個人理財", page_icon="💰", layout="wide")
+st.set_page_config(page_title="OniPulsar 星脈流轉", page_icon="💰", layout="wide")
 
 # 確保資料表存在
 db.init_db()
@@ -1524,7 +1524,7 @@ def update_gate() -> None:
 
     latest = status["latest"] or status["min"]
     st.markdown(
-        '<div class="hero" style="margin-top:2rem"><div><div class="hero-label">個人理財</div>'
+        '<div class="hero" style="margin-top:2rem"><div><div class="hero-label">OniPulsar 星脈流轉</div>'
         '<div class="hero-num" style="font-size:2.6rem">需要更新</div>'
         f'<div class="hero-note">目前版本 v{html.escape(APP_VERSION)} 已停止使用</div></div>'
         f'<div class="welcome-why">請用 Onei Hub 更新到 v{html.escape(latest)} 才能繼續使用。'
@@ -1534,7 +1534,7 @@ def update_gate() -> None:
     col1, col2, _ = st.columns([1, 1, 2])
     if col1.button("用 Onei Hub 更新", type="primary", icon=":material/system_update:", width="stretch"):
         if update_check.open_hub():
-            st.toast("已經打開 Onei Hub，請在「個人理財」頁按「需要更新」", icon=":material/check_circle:")
+            st.toast("已經打開 Onei Hub，請在「OniPulsar 星脈流轉」頁按「需要更新」", icon=":material/check_circle:")
         else:
             st.warning("找不到 Onei Hub，請先按右邊的「下載 Onei Hub」安裝。")
     if col2.button("下載 Onei Hub", icon=":material/download:", width="stretch"):
@@ -1558,8 +1558,9 @@ for group, items in NAV:
 current = st.navigation(pages, position="hidden")
 
 with st.sidebar:
-    st.markdown('<div class="brand">個人理財</div>'
-                '<div class="brand-sub">本機執行・資料只存在你的電腦</div>',
+    # 名稱：OniPulsar 星脈流轉（2026-10-22 使用者取的新名字，原名「個人理財」）
+    st.markdown('<div class="brand">OniPulsar</div>'
+                '<div class="brand-sub">星脈流轉・資料只存在你的電腦</div>',
                 unsafe_allow_html=True)
     for group, group_pages in pages.items():
         st.markdown(f'<div class="nav-group">{group}</div>', unsafe_allow_html=True)

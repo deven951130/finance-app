@@ -1,7 +1,7 @@
 """CI 用：連進視窗裡的網頁引擎（Chrome DevTools Protocol），確認理財系統的畫面真的有顯示。
 
 用法：python check_window.py 9222
-做的事：重新載入頁面，最多等 40 秒，看頁面標題會不會變成「個人理財」。
+做的事：重新載入頁面，最多等 40 秒，看頁面標題會不會變成「OniPulsar 星脈流轉」。
 同時把網頁的錯誤訊息（console、JavaScript 例外）印出來，畫面空白時可以知道原因。
 """
 
@@ -75,7 +75,7 @@ while time.time() < deadline:
         value = msg["result"]["result"].get("value", "")
         if isinstance(value, str) and value.startswith("{"):
             print("state:", value)
-            if "理財" in json.loads(value).get("title", ""):
+            if "OniPulsar" in json.loads(value).get("title", ""):
                 ok = True
                 break
     elif "error" in msg:

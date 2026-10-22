@@ -1,7 +1,7 @@
 """
 啟動時檢查版本：太舊就要求用 Onei Hub 更新。
 
-做法：讀 Onei Hub 伺服器上公開的軟體清單（catalog.json），找到「個人理財」的 min_version（最低可用版本），
+做法：讀 Onei Hub 伺服器上公開的軟體清單（catalog.json），找到「OniPulsar 星脈流轉」（id 還是 finance-app）的 min_version（最低可用版本），
 目前版本（version.py）比它舊，畫面就整個擋住，只顯示「需要更新」。
 
 規則（2026-10-21 使用者決定）：
@@ -24,7 +24,7 @@ from version import APP_VERSION
 
 APP_ID = "finance-app"
 CATALOG_URL = "https://oneihub.absoluteaxis.dpdns.org/catalog.json"
-HUB_LINK = f"oneihub://app/{APP_ID}"   # Onei Hub 會被叫出來並跳到「個人理財」頁
+HUB_LINK = f"oneihub://app/{APP_ID}"   # Onei Hub 會被叫出來並跳到「OniPulsar 星脈流轉」頁
 HUB_DOWNLOAD = "https://oneihub.absoluteaxis.dpdns.org/#download"
 TIMEOUT = 5  # 秒：沒網路時最多讓啟動慢這麼久
 
@@ -43,7 +43,7 @@ def check() -> dict | None:
 
 
 def open_hub() -> bool:
-    """叫出 Onei Hub 並跳到「個人理財」。成功送出回傳 True。
+    """叫出 Onei Hub 並跳到「OniPulsar 星脈流轉」。成功送出回傳 True。
 
     用作業系統打開 oneihub:// 連結（和在檔案總管點連結一樣），不從網頁裡開：
     視窗版的網頁元件不一定允許打開自訂協定。

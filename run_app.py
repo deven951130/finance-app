@@ -26,7 +26,7 @@ import time
 import traceback
 import urllib.request
 
-APP_TITLE = "個人理財管理系統"
+APP_TITLE = "OniPulsar 星脈流轉"
 
 # 資料、錯誤紀錄都放在這個資料夾（和 db.py 的資料庫位置相同）
 LOG_DIR = os.path.join(os.path.expanduser("~"), "FinanceApp")
@@ -191,7 +191,7 @@ LOADING_HTML = """
 <html><body style="margin:0;height:100vh;display:flex;align-items:center;justify-content:center;
 background:#f4f9fc;color:#1C2833;font-family:'Noto Sans TC','Microsoft JhengHei','PingFang TC',sans-serif;">
 <div style="text-align:center">
-  <div style="font-size:22px;font-weight:600;margin-bottom:8px">個人理財管理系統</div>
+  <div style="font-size:22px;font-weight:600;margin-bottom:8px">OniPulsar 星脈流轉</div>
   <div style="font-size:15px;color:#5F6672">正在啟動，請稍候…</div>
 </div>
 <!--SPLASH-->
