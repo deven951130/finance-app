@@ -108,3 +108,12 @@ def test_剛好四成不警告():
         make_holding("CCC", "A", 3, 100, 100),
     ]
     assert over_concentrated(analyze(holdings)) == []
+
+
+def test_總損益只加知道均價的個股():
+    from models.stocks import profit_totals
+    analyzed = analyze([
+        {"name": "甲", "symbol": "1111", "account": "A", "shares": 10, "avg_price": 100, "price": 120},
+        {"name": "乙", "symbol": "2222", "account": "A", "shares": 10, "avg_price": 0, "price": 50},
+    ])
+    assert profit_totals(analyzed) == (pytest.approx(200), pytest.approx(1000), 1)

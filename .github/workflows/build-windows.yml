@@ -126,7 +126,7 @@ jobs:
             $bmp.Save("$PWD\dist\screenshot\window.png")
           } catch { Write-Host "截圖失敗：$_" }
 
-          # 連進視窗裡的網頁引擎，確認畫面真的畫好了（標題變成「個人理財」），
+          # 連進視窗裡的網頁引擎，確認畫面真的畫好了（標題變成「OniPulsar 星脈流轉」），
           # 沒畫好的話會印出網頁的錯誤訊息
           python -m pip install -q websocket-client
           python .github\scripts\check_window.py 9222

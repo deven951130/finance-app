@@ -14,9 +14,15 @@ datas = [
     # (來源, 放到 exe 裡的哪個資料夾)
     ("app.py", "."),
     ("db.py", "."),
+    ("quotes.py", "."),  # 股價自動更新（新增最上層的 .py 檔都要加在這裡）
+    ("update_check.py", "."),  # 啟動時檢查版本
+    ("version.py", "."),
     # 只打包 .py：整個資料夾會連 __pycache__ 一起帶進去，
     # 裡面的 .pyc 記錄了打包電腦上的絕對路徑（可能含使用者名稱），不該出現在公開的下載檔
     ("models/*.py", "models"),
+    # Oneiroverse 開啟畫面（run_app.py 的啟動頁用）：OneiHub/brand-kit 的複本
+    ("oneiroverse/splash.js", "oneiroverse"),
+    ("oneiroverse/*.png", "oneiroverse"),
     # 主題設定：Streamlit 會讀「app.py 旁邊的 .streamlit/config.toml」，
     # 所以放到和 app.py 同一層的 .streamlit 資料夾，exe 版就會套用一樣的配色和字型
     (".streamlit/config.toml", ".streamlit"),
@@ -33,7 +39,7 @@ for package in ["streamlit", "altair"]:
     hiddenimports += pkg_hidden
 
 # app.py 用到、但 PyInstaller 從 run_app.py 找不到的模組
-hiddenimports += ["pandas", "sqlite3"] + collect_submodules("models")
+hiddenimports += ["pandas", "sqlite3", "urllib.request"] + collect_submodules("models")
 
 a = Analysis(
     ["run_app.py"],

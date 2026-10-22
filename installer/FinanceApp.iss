@@ -31,7 +31,7 @@
 ; AppId 是這個軟體的「身分證字號」，Windows 用它判斷是不是同一個軟體。
 ; 一旦發佈就不要改：改了之後，新版會被當成另一個軟體，舊版不會被更新掉。
 AppId={{2F2A5615-5C5E-448E-840C-AF74F38647C0}
-AppName=個人理財管理系統
+AppName=OniPulsar 星脈流轉
 AppVersion={#AppVersion}
 AppPublisher=deven951130
 AppPublisherURL=https://github.com/deven951130/finance-app
@@ -39,7 +39,7 @@ AppPublisherURL=https://github.com/deven951130/finance-app
 ; 這樣不需要系統管理員權限，安裝時不會跳出「是否允許變更」的視窗。
 PrivilegesRequired=lowest
 DefaultDirName={autopf}\FinanceApp
-DefaultGroupName=個人理財管理系統
+DefaultGroupName=OniPulsar 星脈流轉
 ; 開始選單資料夾名稱固定，不讓使用者改，少一個步驟
 DisableProgramGroupPage=yes
 ; 打包出來的程式是 64 位元的
@@ -50,7 +50,7 @@ OutputDir=..\dist\installer
 OutputBaseFilename=FinanceApp-Setup-{#AppVersion}
 SetupIconFile=icon.ico
 UninstallDisplayIcon={app}\icon.ico
-UninstallDisplayName=個人理財管理系統
+UninstallDisplayName=OniPulsar 星脈流轉
 ; lzma2 + solid：壓縮率最好，約 280 MB 的程式可以壓到 100 MB 以下
 Compression=lzma2
 SolidCompression=yes
@@ -72,6 +72,9 @@ Type: filesandordirs; Name: "{app}\_internal"
 Type: files; Name: "{app}\FinanceApp.exe"
 Type: filesandordirs; Name: "{app}\python"
 Type: filesandordirs; Name: "{app}\app"
+; 2026-10-22 改名（個人理財管理系統 → OniPulsar 星脈流轉）：刪掉舊名字的開始選單資料夾和桌面捷徑，不然會有兩個
+Type: filesandordirs; Name: "{userprograms}\個人理財管理系統"
+Type: files; Name: "{userdesktop}\個人理財管理系統.lnk"
 
 [UninstallDelete]
 ; Python 第一次執行時會自己產生 __pycache__（加快下次啟動），不是安裝進去的檔案，
@@ -88,14 +91,14 @@ Source: "..\dist\FinanceApp\*"; DestDir: "{app}"; Flags: ignoreversion recursesu
 ; IconFilename：捷徑用理財系統的圖示，不是 Python 的。
 ; AppUserModelID：和 run_app.py 的 APP_ID 一樣，工作列才會顯示理財系統的圖示、不和其他 Python 程式擠在一起。
 ; 開始選單
-Name: "{group}\個人理財管理系統"; Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\app\run_app.py"""; WorkingDir: "{app}\app"; IconFilename: "{app}\icon.ico"; AppUserModelID: "deven951130.FinanceApp"; Comment: "記帳、預算、負債與持股管理"
-Name: "{group}\解除安裝 個人理財管理系統"; Filename: "{uninstallexe}"
+Name: "{group}\OniPulsar 星脈流轉"; Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\app\run_app.py"""; WorkingDir: "{app}\app"; IconFilename: "{app}\icon.ico"; AppUserModelID: "deven951130.FinanceApp"; Comment: "記帳、預算、負債與持股管理"
+Name: "{group}\解除安裝 OniPulsar 星脈流轉"; Filename: "{uninstallexe}"
 ; 桌面（只有勾選「建立桌面捷徑」時才建立）
-Name: "{autodesktop}\個人理財管理系統"; Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\app\run_app.py"""; WorkingDir: "{app}\app"; IconFilename: "{app}\icon.ico"; AppUserModelID: "deven951130.FinanceApp"; Tasks: desktopicon
+Name: "{autodesktop}\OniPulsar 星脈流轉"; Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\app\run_app.py"""; WorkingDir: "{app}\app"; IconFilename: "{app}\icon.ico"; AppUserModelID: "deven951130.FinanceApp"; Tasks: desktopicon
 
 [Run]
 ; 安裝完成的最後一頁，提供「立即啟動」的勾選框
-Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\app\run_app.py"""; WorkingDir: "{app}\app"; Description: "立即啟動 個人理財管理系統"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\app\run_app.py"""; WorkingDir: "{app}\app"; Description: "立即啟動 OniPulsar 星脈流轉"; Flags: nowait postinstall skipifsilent
 
 [Code]
 // 解除安裝完成後提醒：資料沒有被刪掉，在哪裡

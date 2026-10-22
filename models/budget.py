@@ -8,8 +8,52 @@
 
 from datetime import date
 
-# 生活預算的四個類別（之後要加類別，改這裡就好）
-CATEGORIES = ["吃飯", "約會禮物", "交通", "其他"]
+# 支出的主類別（預算是照主類別設定）和每個主類別底下的細項。之後要加類別，改這裡就好。
+# 原本的四個主類別（吃飯、約會禮物、交通、其他）名字不變，舊的記帳和預算才對得上；
+# 2026-10-22 使用者要求「種類再多、要分細項」，加上後面五個主類別和所有細項。
+# （dict 會照寫的順序排，像 C++ 的 std::vector<std::pair<...>>，畫面上的順序就是這裡的順序）
+SUBCATEGORIES = {
+    "吃飯": ["早餐", "午餐", "晚餐", "飲料點心", "聚餐", "買菜"],
+    "交通": ["捷運公車", "加油", "停車", "計程車", "火車高鐵", "機車汽車保養"],
+    "購物": ["日用品", "衣服鞋子", "3C 電子", "網購"],
+    "居家": ["房租", "水電瓦斯", "網路電話", "家具家電"],
+    "娛樂": ["電影展覽", "遊戲", "旅遊", "訂閱服務", "運動"],
+    "約會禮物": ["約會", "禮物", "紅包"],
+    "醫療保健": ["看診", "藥品", "保健食品", "保險"],
+    "學習": ["書籍", "課程", "文具"],
+    "其他": ["手續費", "捐款", "其他"],
+}
+CATEGORIES = list(SUBCATEGORIES)
+
+# 收入的類別和細項（收入不設預算）
+INCOME_CATEGORIES = {
+    "薪資": ["月薪", "加班費", "兼職打工"],
+    "獎金": ["年終", "績效", "三節"],
+    "投資": ["股利", "利息", "賣股獲利"],
+    "家人朋友": ["零用錢", "紅包", "還錢"],
+    "其他收入": ["退款", "中獎", "二手拍賣", "其他"],
+}
+
+
+def category_options(kind: str = "expense") -> list[str]:
+    """選單用的選項：「主類別 · 細項」攤平成一個清單，例如「吃飯 · 午餐」。
+
+    為什麼攤平：Streamlit 的表單（st.form）裡，選了主類別不會馬上更新細項選單，
+    所以把兩層合成一個選單，一次選完。
+    """
+    table = SUBCATEGORIES if kind == "expense" else INCOME_CATEGORIES
+    return [f"{main} · {sub}" for main, subs in table.items() for sub in subs]
+
+
+def split_option(option: str) -> tuple[str, str | None]:
+    """「吃飯 · 午餐」→ ("吃飯", "午餐")；沒有細項的舊資料（只有主類別）→ ("吃飯", None)。"""
+    main, _, sub = option.partition(" · ")
+    return main, (sub or None)
+
+
+def join_option(main: str, sub: str | None) -> str:
+    """("吃飯", "午餐") → 「吃飯 · 午餐」；沒有細項就只有主類別。"""
+    return f"{main} · {sub}" if sub else main
 
 
 def is_in_month(date_str: str, year: int, month: int) -> bool:

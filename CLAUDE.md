@@ -30,7 +30,7 @@
 python -m venv .venv && source .venv/bin/activate   # Windows：.venv\Scripts\activate
 pip install -r requirements.txt
 streamlit run app.py          # http://localhost:8501，第一次會自動建立 data/finance.db
-pytest                        # 目前 83 passed（含 tests/test_app.py 的畫面測試）
+pytest                        # 目前 168 passed（含 tests/test_app.py 的畫面測試；測試不會連網路）
 
 # 用虛構範例資料啟動（不會動到 finance.db）
 python seed_example.py
@@ -54,14 +54,17 @@ FINANCE_DB=data/example.db streamlit run app.py
 ### 各檔案職責
 
 - `app.py`（約 1100 行）：由上到下是「配色與 CSS（`inject_css`）→ 共用小工具（`money`、`ledger`、`summary_strip`、`notices`、`plain`、`done`、`budget_bar`、`show_donut`、`welcome`…）→ 各頁 `page_*()` 函式 → 側邊欄 → 主程式（`NAV` 清單 + `st.navigation`）」。新增頁面：寫一個 `page_xxx()`，再加進檔尾的 `NAV`。外觀是「存摺」風格：一排數字用 `summary_strip()`、自律提醒用 `notices()`、明細用 `ledger()`。
-- `db.py`：`DB_PATH` 預設是 `data/finance.db`；視窗版（`run_app.py` 設定環境變數，或 PyInstaller 的 `sys.frozen`）是 `~/FinanceApp/finance.db`；環境變數 `FINANCE_DB` 可覆蓋。`init_db()` 用 `CREATE TABLE IF NOT EXISTS` 建 9 張表：`settings`（key/value）、`budgets`、`expenses`、`fixed_expenses`、`debts`、`debt_payments`（還款紀錄）、`holdings`、`trades`、`networth_history`（每天的淨資產）。也負責每日自動備份（`auto_backup`，資料庫旁的 `backups/`，留 14 份）和還原（`restore_backup`，還原前先另存）。
+- `db.py`：`DB_PATH` 預設是 `data/finance.db`；視窗版（`run_app.py` 設定環境變數，或 PyInstaller 的 `sys.frozen`）是 `~/FinanceApp/finance.db`；環境變數 `FINANCE_DB` 可覆蓋。`init_db()` 用 `CREATE TABLE IF NOT EXISTS` 建 11 張表：`settings`（key/value）、`accounts`（銀行帳戶，`cash_on_hand` = 帳戶合計）、`budgets`、`expenses`（含收入）、`fixed_expenses`、`debts`、`debt_payments`（還款紀錄）、`holdings`（`account` 欄是券商名稱，`avg_price` 0 = 不知道）、`brokers`（券商手續費折扣、最低手續費）、`trades`、`networth_history`（每天的淨資產）。舊資料庫缺的欄位用 `add_column()` 補。買賣股票用 `execute_trade()`：帳戶、持股、交易紀錄在同一個交易裡一起改；`trade_preview()` 只算不寫。也負責每日自動備份（`auto_backup`，資料庫旁的 `backups/`，留 14 份）和還原（`restore_backup`，還原前先另存）。
 - `models/budget.py`：預算類別 `CATEGORIES`（唯一定義處）、篩選某月、本月還能花多少。
 - `models/cashflow.py`：每月可存 = 收入 − 固定支出 − 負債還款 − 生活預算。
 - `models/debt.py`：這期還多少、剩幾期、預計還清月份（假設下一期在下個月繳）。
-- `models/stocks.py`：同代號跨帳戶合併（加權平均均價）、市值、損益、占比、40% 集中警告、回本價。
+- `models/stocks.py`：同代號跨券商合併（加權平均均價）、市值、損益、占比、40% 集中警告、回本價。沒填均價的個股 `profit` 是 None，總損益用 `profit_totals()` 只加有值的。
+- `models/fees.py`：手續費（× 券商折扣，最低手續費）、證券交易稅（股票 0.3%、ETF 0.1%、當沖 0.15%）、加碼後均價、實現損益。
 - `models/precheck.py`：下單前檢查，`CHECK_ITEMS` 五個勾選項，回傳 `(可不可以下單, 原因清單)`。
 - `models/trades.py`：交易類型、本月當沖次數、累計損益。
 - `models/dca.py`：定期定額複利試算、4% 法則。
+- `models/quotes.py`：解析證交所 MIS 即時行情、證交所／櫃買中心每日收盤價，代號正規化、交易時間判斷（純函式）。
+- `quotes.py`：**整個程式唯一連網路的地方**：`fetch_prices()` 先問 MIS，MIS 整個失敗才下載官方每日收盤價；不丟例外，失敗時回傳 `error`。只送股票代號。`app.py` 的 `refresh_quotes()` 用 `st.cache_data` 記 5 分鐘，設定 `auto_quotes = 0` 時不連線。
 - `seed_example.py`：產生虛構範例資料到 `data/example.db`，路徑不是 `example.db` 就拒絕執行。
 - `run_app.py`：視窗版入口（pywebview 開視窗 + 背景 Streamlit）。
 - Windows 安裝檔：`installer/build_runtime.py`（官方嵌入式 Python + `requirements-runtime.txt` 的套件 + 程式碼 → `dist/FinanceApp`）→ `installer/FinanceApp.iss`（Inno Setup）。捷徑執行 `python\pythonw.exe app\run_app.py`。
@@ -83,7 +86,10 @@ FINANCE_DB=data/example.db streamlit run app.py
 - `requirements-build.txt` 要保持**純 ASCII**（Windows 的 pip 用 cp950 讀，有中文會失敗）。
 - `.streamlit/config.toml` 由 `FinanceApp.spec` 打包到 exe 裡 `app.py` 旁邊的 `.streamlit/`（Streamlit 會讀「主程式旁邊」的設定檔），所以 exe 版也有主題；改完要重新打包才會生效。`run_app.py` 的命令列參數優先權比 config.toml 高，兩邊不要設成不一樣的值。
 - 改完畫面跑 `pytest`：`tests/test_app.py` 會用 AppTest 跑每一頁（有資料、空資料各一次）。頁面是函式，AppTest 的 `switch_page` 用不了，所以測試用 `runpy` 執行 app.py 再呼叫頁面函式。新增頁面要加進 `PAGES` 清單。
+- **測試不能連網路**：`tests/test_app.py` 有 autouse fixture 把 `quotes.fetch_prices` 換成假資料，並清掉 `st.cache_data`。新增會連網路的功能，也要在測試裡換掉。
+- `seed_example.py` 把 `auto_quotes` 設成 0：範例資料的股價保持虛構，截圖不會變成真實股價。
 - 頁面裡要連到別頁用 `st.page_link(PAGES["網址名"])`（`PAGES` 在 app.py 檔尾建立）。
+- **測試時不要讓使用者在帶著 `FINANCE_DB` 的程式裡記帳**：環境變數會傳給子程式（例如從 Onei Hub 開的理財系統），記下的資料會寫進測試資料庫，正常打開時就「不見了」（2026-10-21 發生過）。現在 `FINANCE_DB` 指到平常以外的檔案時，每頁最上面會顯示警告（`db.is_unusual_db`）。測完要把帶測試環境變數的程式全部關掉，用一般方式重開。
 
 ## Windows 打包的坑（不要再犯）
 
@@ -111,11 +117,12 @@ FINANCE_DB=data/example.db streamlit run app.py
 - ✅ MIT 授權、README 下載說明
 - ✅ 介面改版：存摺風格，並修正全面測試找到的問題（2026-10-13）
 - ✅ Windows 安裝程式（安裝精靈、獨立視窗、CI 實際安裝測試）
+- ✅ v1.0.0 發布（2026-10-21）：GitHub Release 附安裝檔；也上架 Onei Hub（伺服器 `downloads/finance-app-v1.0.0-win-x64.zip`）
 - ✅ v1 實用功能（2026-10-21）：首次使用引導、側邊欄記一筆、記帳月份切換與修改、6 個月趨勢、淨資產變化、還款紀錄、每日自動備份與還原；安裝版改用官方嵌入式 Python
 
 下一步建議的待辦（完整清單和理由見 `docs/開發紀錄.md` 的「待辦」）：
-1. ETF 賣出交易稅是 0.1%（目前一律用 0.3%），手續費最低 20 元
-2. 手上現金不會隨記帳／交易自動更新
+1. 回本價（`models/stocks.breakeven_price`）還是用不打折的手續費和 0.3% 稅，可以改成照券商折扣和 ETF 稅率
+2. 刪除交易紀錄不會把持股和帳戶改回去
 3. 記帳類別寫死在 `models/budget.py`，可以考慮讓使用者自訂
 
 開始做任何一項之前，先跟使用者確認要做哪一項。

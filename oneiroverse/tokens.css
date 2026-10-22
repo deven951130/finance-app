@@ -1,0 +1,17 @@
+/* Oneiroverse 品牌色與字型（所有 Oneiroverse 軟體共用，正本在 OneiHub/brand-kit/）。
+   只放「看得出是同一家公司」的東西：品牌色、深色底、字型。各 App 自己的版面配色（遊戲畫面、存摺風格）不在這裡。 */
+:root {
+  /* 深色介面的底色 */
+  --ov-night: #06162b;
+  --ov-night-deep: #020b18;
+  /* 品牌色取自 Logo 月牙：青 → 紫 */
+  --ov-cyan: #3be3e0;
+  --ov-violet: #7b5cf0;
+  --ov-gradient: linear-gradient(100deg, #3be3e0 0%, #62a8ff 50%, #7b5cf0 100%);
+  /* 深色底上的文字 */
+  --ov-text: #e8eefc;
+  --ov-text-mute: #9ba7c6;
+  /* 淺色底：開啟畫面的底色，Logo 圖層就是以這個顏色去背的 */
+  --ov-paper: #f4f9fc;
+  --ov-font: "Noto Sans TC", "Microsoft JhengHei UI", "Microsoft JhengHei", "PingFang TC", system-ui, sans-serif;
+}

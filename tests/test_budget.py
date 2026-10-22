@@ -67,4 +67,7 @@ def test_各類別剩餘():
         make_expense(2500, "約會禮物", "2026-10-02"),  # 這個類別超支 500
     ]
     left = remaining_by_category(BUDGETS, expenses)
-    assert left == {"吃飯": 5000, "約會禮物": -500, "交通": 1500, "其他": 500}
+    assert left["吃飯"] == 5000
+    assert left["約會禮物"] == -500   # 超支是負數
+    assert left["交通"] == 1500 and left["其他"] == 500
+    assert left["購物"] == 0          # 沒設預算、也沒花錢的類別是 0
