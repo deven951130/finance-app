@@ -5,4 +5,4 @@
 啟動時會拿它和 Onei Hub 伺服器上的「最低可用版本」比較，太舊就要求更新（見 update_check.py）。
 """
 
-APP_VERSION = "1.1.3"
+APP_VERSION = "1.1.4"
