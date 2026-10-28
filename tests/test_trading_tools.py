@@ -108,6 +108,6 @@ def test_匯出的zip包含每張資料表(tmp_path, monkeypatch):
         text = zf.read("expenses.csv").decode("utf-8-sig")
 
     rows = list(csv.reader(io.StringIO(text)))
-    # 後面三欄是 2026-10-22 加的：支出／收入、細項、帳戶（舊資料庫升級時補在最後）
-    assert rows[0] == ["id", "amount", "category", "date", "note", "kind", "subcategory", "account_id"]
-    assert rows[1][1:] == ["120.0", "吃飯", "2026-10-01", "午餐", "expense", "", ""]
+    # 後面幾欄是後來加的：支出／收入、細項、帳戶（2026-10-22）、信用卡（2026-10-28），舊資料庫升級時補在最後
+    assert rows[0] == ["id", "amount", "category", "date", "note", "kind", "subcategory", "account_id", "card_id"]
+    assert rows[1][1:] == ["120.0", "吃飯", "2026-10-01", "午餐", "expense", "", "", ""]

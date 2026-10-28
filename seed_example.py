@@ -97,6 +97,24 @@ def main() -> None:
     # 學貸本月已經還過一期（示範「本月已還」和還款紀錄；會從手上現金扣 3500）
     db.pay_debt_installment(db.get_debts()[0]["id"], day(5))
 
+    # 別人欠我的錢：一筆以前借的（不動帳戶）、一筆已經收回一部分
+    friend = db.add_receivable("範例朋友 借去繳房租", 6000, (today - timedelta(days=40)).isoformat(), "說月底還")
+    db.add_receivable("範例同事 代墊聚餐", 850, day(3), "")
+    db.collect_receivable(friend, 2000, bank, day(4))  # 朋友先還 2000，進範例銀行
+
+    # 信用卡：上個月的已經繳清，這個月的還沒繳（會從範例銀行扣）
+    card_a = db.add_card("範例 A 卡", 15)
+    card_b = db.add_card("範例 B 卡", 25)
+    this_month = today.isoformat()[:7]
+    last = (today.replace(day=1) - timedelta(days=1)).isoformat()[:7]
+    db.set_card_bill(card_a, last, 4200)
+    db.pay_card_bill(db.get_card_bills()[0]["id"], 4200, bank, last + "-12")
+    db.set_card_bill(card_a, this_month, 3680)
+    db.set_card_bill(card_b, this_month, 1290)
+    # 本月用 A 卡刷的記帳：不扣帳戶，自動加到 A 卡下個月的帳單
+    db.add_expense(680, "約會禮物", day(6), "生日禮物", subcategory="禮物", card_id=card_a)
+    db.add_expense(399, "其他", day(7), "網購", subcategory="其他", card_id=card_a)
+
     # 持股（台積電放在兩個帳戶，示範合併；範例股價都是虛構的）
     db.add_holding("台積電", "2330", "A 證券", 20, 820, 1000)
     db.add_holding("台積電", "2330", "B 證券", 30, 900, 1000)

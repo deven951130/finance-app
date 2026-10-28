@@ -1,7 +1,7 @@
 """
 每月現金流計算。
 
-每月可存 = 收入 − 固定支出 − 負債還款 − 生活預算
+每月可存 = 收入 − 固定支出 − 負債還款 − 生活預算 − 信用卡費
 """
 
 
@@ -18,6 +18,10 @@ def total_debt_payment(debts: list[dict]) -> float:
     return total
 
 
-def monthly_savings(income: float, fixed_total: float, debt_payment: float, living_budget: float) -> float:
-    """每月可存多少。結果是負數代表每個月入不敷出。"""
-    return income - fixed_total - debt_payment - living_budget
+def monthly_savings(income: float, fixed_total: float, debt_payment: float, living_budget: float,
+                    card_bills: float = 0.0) -> float:
+    """每月可存多少。結果是負數代表每個月入不敷出。
+
+    card_bills 是這個月的信用卡帳單合計（沒有信用卡就是 0，所以給預設值，舊的呼叫不用改）。
+    """
+    return income - fixed_total - debt_payment - living_budget - card_bills

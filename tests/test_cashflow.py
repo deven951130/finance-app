@@ -81,3 +81,8 @@ def test_預計還清月份跨到十二月():
 
 def test_已還清沒有還清月份():
     assert payoff_month(0, 5000, date(2026, 10, 1)) is None
+
+
+def test_每月可存_扣掉信用卡費():
+    # 50000 − 1500 − 8000 − 15000 − 信用卡 6000 = 19500
+    assert monthly_savings(50000, 1500, 8000, 15000, 6000) == 19500

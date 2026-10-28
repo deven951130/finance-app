@@ -19,8 +19,10 @@ import zipfile
 from datetime import date, datetime
 
 from models.budget import CATEGORIES
+from models.cards import bill_month, unpaid
 from models.debt import payment_this_period
 from models.fees import DEFAULT_MIN_FEE, avg_after_buy, realized_pnl, trade_summary
+from models.receivables import collect_amount
 
 
 
@@ -169,12 +171,54 @@ def init_db() -> None:
             f" min_fee REAL NOT NULL DEFAULT {DEFAULT_MIN_FEE})"
         )
 
+        # 別人欠我的錢（2026-10-28 使用者要求）：amount 是原本借出多少，remaining 是還沒收回多少
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS receivables ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " name TEXT NOT NULL,"
+            " amount REAL NOT NULL,"
+            " remaining REAL NOT NULL,"
+            " date TEXT NOT NULL,"
+            " note TEXT)"
+        )
+        # 收款紀錄：每收回一筆記一筆（跟 debt_payments 一樣的作法）
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS receivable_payments ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " receivable_id INTEGER NOT NULL,"
+            " date TEXT NOT NULL,"
+            " amount REAL NOT NULL,"
+            " account_id INTEGER)"
+        )
+        # 信用卡（2026-10-28 使用者要求「單獨立項」）：due_day 是每月幾號以前要繳
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS credit_cards ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " name TEXT NOT NULL,"
+            " due_day INTEGER NOT NULL)"
+        )
+        # 信用卡帳單：一張卡一個月一張（UNIQUE 讓同一個月再填一次變成修改）。
+        # month 是繳款的月份 'YYYY-MM'；paid 是已經繳了多少，可以分好幾次繳
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS card_bills ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " card_id INTEGER NOT NULL,"
+            " month TEXT NOT NULL,"
+            " amount REAL NOT NULL,"
+            " paid REAL NOT NULL DEFAULT 0,"
+            " paid_date TEXT,"
+            " account_id INTEGER,"
+            " UNIQUE (card_id, month))"
+        )
+
         # 舊資料庫升級：CREATE TABLE IF NOT EXISTS 不會幫已經存在的表加欄位，要自己用 ALTER TABLE 補
         # 記帳：kind 是支出 expense 或收入 income；subcategory 是細項；account_id 是從哪個帳戶進出
         #   舊的記帳沒有帳戶（NULL），不影響任何帳戶的餘額
         add_column(conn, "expenses", "kind", "TEXT NOT NULL DEFAULT 'expense'")
         add_column(conn, "expenses", "subcategory", "TEXT")
         add_column(conn, "expenses", "account_id", "INTEGER")
+        # card_id：用哪張信用卡刷的。刷卡的支出不動帳戶（account_id 是 NULL），而是加到那張卡的帳單
+        add_column(conn, "expenses", "card_id", "INTEGER")
         # 負債：kind 是定期還 installment（每月固定還款）或不限期 open（沒有固定還款，有錢就還）
         add_column(conn, "debts", "kind", "TEXT NOT NULL DEFAULT 'installment'")
         # 還款紀錄：從哪個帳戶還的
@@ -310,6 +354,8 @@ def delete_account(account_id: int) -> None:
         conn.execute("UPDATE expenses SET account_id = NULL WHERE account_id = ?", (account_id,))
         conn.execute("UPDATE debt_payments SET account_id = NULL WHERE account_id = ?", (account_id,))
         conn.execute("UPDATE trades SET account_id = NULL WHERE account_id = ?", (account_id,))
+        conn.execute("UPDATE receivable_payments SET account_id = NULL WHERE account_id = ?", (account_id,))
+        conn.execute("UPDATE card_bills SET account_id = NULL WHERE account_id = ?", (account_id,))
         conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
 
 
@@ -319,6 +365,25 @@ def _apply(conn: sqlite3.Connection, account_id: int | None, kind: str, amount: 
         return
     delta = amount if kind == "income" else -amount
     conn.execute("UPDATE accounts SET balance = balance + ? WHERE id = ?", (sign * delta, account_id))
+
+
+def _apply_card(conn: sqlite3.Connection, card_id: int | None, kind: str, amount: float, date_str: str,
+                sign: int = 1) -> None:
+    """刷卡的支出加到那張卡「下個月」的帳單（見 models/cards.py 的 bill_month）；sign = -1 是扣回來。"""
+    if card_id is None or kind != "expense":
+        return
+    month = bill_month(date_str)
+    if sign > 0:
+        # 那個月還沒有帳單就新建一張，有的話加上去（upsert，見 set_card_bill）
+        conn.execute(
+            "INSERT INTO card_bills (card_id, month, amount) VALUES (?, ?, ?)"
+            " ON CONFLICT (card_id, month) DO UPDATE SET amount = amount + excluded.amount",
+            (card_id, month, amount),
+        )
+    else:
+        # max(..., 0)：在信用卡頁把帳單改小之後再刪掉刷卡的記帳，帳單不會變成負的
+        conn.execute("UPDATE card_bills SET amount = max(amount - ?, 0) WHERE card_id = ? AND month = ?",
+                     (amount, card_id, month))
 
 
 # ---------- 每月生活預算 ----------
@@ -342,23 +407,28 @@ def save_budgets(budgets: dict[str, float]) -> None:
 
 # ---------- 記帳 ----------
 
-RECORD_COLUMNS = "id, kind, amount, category, subcategory, date, note, account_id"
+RECORD_COLUMNS = "id, kind, amount, category, subcategory, date, note, account_id, card_id"
 
 
 def add_expense(amount: float, category: str, date_str: str, note: str,
-                subcategory: str | None = None, account_id: int | None = None, kind: str = "expense") -> None:
+                subcategory: str | None = None, account_id: int | None = None, kind: str = "expense",
+                card_id: int | None = None) -> None:
     """新增一筆記帳。kind 是 "expense"（支出）或 "income"（收入），date_str 格式為 'YYYY-MM-DD'。
 
     有選帳戶時，在同一個交易裡更新那個帳戶的餘額（支出扣、收入加）。
+    用信用卡刷的（card_id）：不動帳戶，加到那張卡下個月的帳單（見 _apply_card）。
     """
+    if card_id is not None:
+        account_id = None  # 刷卡當下錢還沒離開帳戶，繳卡費時才扣
     with get_connection() as conn:
         # 用 ? 當佔位符號，不要自己拼字串，可以避免 SQL injection
         conn.execute(
-            "INSERT INTO expenses (kind, amount, category, subcategory, date, note, account_id)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (kind, amount, category, subcategory, date_str, note, account_id),
+            "INSERT INTO expenses (kind, amount, category, subcategory, date, note, account_id, card_id)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (kind, amount, category, subcategory, date_str, note, account_id, card_id),
         )
         _apply(conn, account_id, kind, amount)
+        _apply_card(conn, card_id, kind, amount, date_str)
 
 
 def get_records_in_month(year: int, month: int) -> list[dict]:
@@ -400,30 +470,38 @@ def get_expense_months() -> list[str]:
 
 
 def update_expense(expense_id: int, amount: float, category: str, date_str: str, note: str,
-                   subcategory: str | None = None, account_id: int | None = None, kind: str | None = None) -> None:
+                   subcategory: str | None = None, account_id: int | None = None, kind: str | None = None,
+                   card_id: int | None = None) -> None:
     """修改一筆記帳（記錯金額、類別、日期、帳戶時用，不用刪掉重記）。
 
-    帳戶餘額：先把舊的那筆對帳戶的影響還原，再套用新的（換了帳戶也對得上）。
+    帳戶餘額和信用卡帳單：先把舊的那筆的影響還原，再套用新的（換了帳戶、換成刷卡、改日期都對得上）。
     kind 沒給就維持原本的支出／收入。
     """
+    if card_id is not None:
+        account_id = None
     with get_connection() as conn:
-        old = conn.execute("SELECT kind, amount, account_id FROM expenses WHERE id = ?", (expense_id,)).fetchone()
+        old = conn.execute("SELECT kind, amount, date, account_id, card_id FROM expenses WHERE id = ?",
+                           (expense_id,)).fetchone()
         kind = kind or old["kind"]
         _apply(conn, old["account_id"], old["kind"], old["amount"], sign=-1)
+        _apply_card(conn, old["card_id"], old["kind"], old["amount"], old["date"], sign=-1)
         conn.execute(
             "UPDATE expenses SET kind = ?, amount = ?, category = ?, subcategory = ?, date = ?, note = ?,"
-            " account_id = ? WHERE id = ?",
-            (kind, amount, category, subcategory, date_str, note, account_id, expense_id),
+            " account_id = ?, card_id = ? WHERE id = ?",
+            (kind, amount, category, subcategory, date_str, note, account_id, card_id, expense_id),
         )
         _apply(conn, account_id, kind, amount)
+        _apply_card(conn, card_id, kind, amount, date_str)
 
 
 def delete_expense(expense_id: int) -> None:
     """刪除一筆記帳（記錯時用），並把它對帳戶餘額的影響還原。"""
     with get_connection() as conn:
-        old = conn.execute("SELECT kind, amount, account_id FROM expenses WHERE id = ?", (expense_id,)).fetchone()
+        old = conn.execute("SELECT kind, amount, date, account_id, card_id FROM expenses WHERE id = ?",
+                           (expense_id,)).fetchone()
         if old:
             _apply(conn, old["account_id"], old["kind"], old["amount"], sign=-1)
+            _apply_card(conn, old["card_id"], old["kind"], old["amount"], old["date"], sign=-1)
         conn.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
 
 
@@ -531,6 +609,161 @@ def pay_debt_installment(debt_id: int, date_str: str | None = None, account_id: 
     if pay <= 0:
         raise ValueError("這筆負債已經還清了")
     return pay_debt(debt_id, pay, account_id, date_str)
+
+
+# ---------- 別人欠我的錢 ----------
+
+def get_receivables() -> list[dict]:
+    """所有別人欠我的錢，還沒收完的在前面，再照借出日期（新的在前）。"""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, name, amount, remaining, date, note FROM receivables"
+            " ORDER BY remaining <= 0, date DESC, id DESC"
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def add_receivable(name: str, amount: float, date_str: str, note: str,
+                   account_id: int | None = None) -> int:
+    """記一筆別人欠我的錢，回傳新的 id。
+
+    account_id 有給：現在才借出去，錢從這個帳戶扣（餘額不夠丟 ValueError，什麼都不改）。
+    account_id 是 None：以前就借出去了，帳戶餘額早就是借出後的數字，不用再扣。
+    """
+    with get_connection() as conn:
+        if account_id is not None:
+            account = conn.execute("SELECT name, balance FROM accounts WHERE id = ?", (account_id,)).fetchone()
+            if amount > account["balance"]:
+                raise ValueError(f"「{account['name']}」餘額 {account['balance']:,.0f} 不夠借出 {amount:,.0f}")
+            conn.execute("UPDATE accounts SET balance = balance - ? WHERE id = ?", (amount, account_id))
+        return conn.execute(
+            "INSERT INTO receivables (name, amount, remaining, date, note) VALUES (?, ?, ?, ?, ?)",
+            (name, amount, amount, date_str, note),
+        ).lastrowid
+
+
+def delete_receivable(receivable_id: int) -> None:
+    """刪除一筆（連同收款紀錄）。已經收回的錢還在帳戶裡，不會被扣回去。"""
+    with get_connection() as conn:
+        conn.execute("DELETE FROM receivables WHERE id = ?", (receivable_id,))
+        conn.execute("DELETE FROM receivable_payments WHERE receivable_id = ?", (receivable_id,))
+
+
+def get_receivable_payments(receivable_id: int) -> list[dict]:
+    """某一筆的收款紀錄，新的在前面。"""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, date, amount, account_id FROM receivable_payments WHERE receivable_id = ?"
+            " ORDER BY date DESC, id DESC",
+            (receivable_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def collect_receivable(receivable_id: int, amount: float, account_id: int,
+                       date_str: str | None = None) -> float:
+    """收回一筆：欠款減少、帳戶增加、記一筆收款紀錄，三件事在同一個交易裡（跟 pay_debt 相反方向）。
+
+    收的比剩下的多時只算剩下的；回傳實際收回多少。
+    """
+    date_str = date_str or date.today().isoformat()
+    with get_connection() as conn:
+        r = conn.execute("SELECT remaining FROM receivables WHERE id = ?", (receivable_id,)).fetchone()
+        got = collect_amount(r["remaining"], amount)
+        if got <= 0:
+            raise ValueError("這筆已經收完了" if r["remaining"] <= 0 else "金額要大於 0")
+        conn.execute("UPDATE receivables SET remaining = remaining - ? WHERE id = ?", (got, receivable_id))
+        conn.execute("UPDATE accounts SET balance = balance + ? WHERE id = ?", (got, account_id))
+        conn.execute(
+            "INSERT INTO receivable_payments (receivable_id, date, amount, account_id) VALUES (?, ?, ?, ?)",
+            (receivable_id, date_str, got, account_id),
+        )
+    return got
+
+
+# ---------- 信用卡 ----------
+
+def get_cards() -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute("SELECT id, name, due_day FROM credit_cards ORDER BY id").fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_card_records() -> list[dict]:
+    """所有用信用卡刷的支出（每月現金流要知道帳單裡有多少是記帳來的）。"""
+    with get_connection() as conn:
+        rows = conn.execute(
+            f"SELECT {RECORD_COLUMNS} FROM expenses WHERE card_id IS NOT NULL AND kind = 'expense' ORDER BY date, id"
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def add_card(name: str, due_day: int) -> int:
+    """新增一張信用卡，due_day 是每月幾號以前要繳。回傳新卡的 id。"""
+    with get_connection() as conn:
+        return conn.execute("INSERT INTO credit_cards (name, due_day) VALUES (?, ?)", (name, due_day)).lastrowid
+
+
+def delete_card(card_id: int) -> None:
+    """刪除一張卡（連同它的帳單）。已經繳掉的錢不會退回帳戶。"""
+    with get_connection() as conn:
+        conn.execute("DELETE FROM credit_cards WHERE id = ?", (card_id,))
+        conn.execute("UPDATE expenses SET card_id = NULL WHERE card_id = ?", (card_id,))
+        conn.execute("DELETE FROM card_bills WHERE card_id = ?", (card_id,))
+
+
+def get_card_bills() -> list[dict]:
+    """所有帳單（附上卡片名稱和繳款日），新的月份在前。
+
+    JOIN：把兩張表照 card_id 對起來，像 C++ 裡用 id 去另一個 map 查資料，只是由資料庫幫你做。
+    """
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT b.id, b.card_id, c.name AS card_name, c.due_day, b.month, b.amount, b.paid,"
+            " b.paid_date, b.account_id"
+            " FROM card_bills b JOIN credit_cards c ON c.id = b.card_id"
+            " ORDER BY b.month DESC, c.id"
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def set_card_bill(card_id: int, month: str, amount: float) -> None:
+    """填某張卡某個月的帳單金額。這個月已經填過就改金額（已經繳的部分保留）。
+
+    ON CONFLICT ... DO UPDATE：撞到 UNIQUE (card_id, month) 時改成更新，叫做 upsert。
+    """
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO card_bills (card_id, month, amount) VALUES (?, ?, ?)"
+            " ON CONFLICT (card_id, month) DO UPDATE SET amount = excluded.amount",
+            (card_id, month, amount),
+        )
+
+
+def delete_card_bill(bill_id: int) -> None:
+    with get_connection() as conn:
+        conn.execute("DELETE FROM card_bills WHERE id = ?", (bill_id,))
+
+
+def pay_card_bill(bill_id: int, amount: float, account_id: int, date_str: str | None = None) -> float:
+    """繳卡費：帳單的已繳金額增加、帳戶扣錢，在同一個交易裡。回傳實際繳了多少。
+
+    繳的比還沒繳的多時只繳剩下的；帳戶餘額不夠丟 ValueError，什麼都不改。
+    不會記成一筆「記帳」：刷卡時的花費如果已經記過帳，繳卡費再記一次就重複算了。
+    """
+    date_str = date_str or date.today().isoformat()
+    with get_connection() as conn:
+        bill = conn.execute("SELECT amount, paid FROM card_bills WHERE id = ?", (bill_id,)).fetchone()
+        account = conn.execute("SELECT name, balance FROM accounts WHERE id = ?", (account_id,)).fetchone()
+        pay = min(amount, unpaid(bill["amount"], bill["paid"]))
+        if pay <= 0:
+            raise ValueError("這張帳單已經繳清了" if unpaid(bill["amount"], bill["paid"]) <= 0 else "金額要大於 0")
+        if pay > account["balance"]:
+            raise ValueError(f"「{account['name']}」餘額 {account['balance']:,.0f} 不夠繳 {pay:,.0f}")
+        conn.execute("UPDATE card_bills SET paid = paid + ?, paid_date = ?, account_id = ? WHERE id = ?",
+                     (pay, date_str, account_id, bill_id))
+        conn.execute("UPDATE accounts SET balance = balance - ? WHERE id = ?", (pay, account_id))
+    return pay
 
 
 # ---------- 持股 ----------
@@ -755,7 +988,8 @@ def get_networth_history() -> list[dict]:
 
 # 要備份的資料表
 EXPORT_TABLES = ["settings", "accounts", "budgets", "expenses", "fixed_expenses",
-                 "debts", "debt_payments", "holdings", "brokers", "trades", "networth_history"]
+                 "debts", "debt_payments", "receivables", "receivable_payments", "credit_cards", "card_bills",
+                 "holdings", "brokers", "trades", "networth_history"]
 
 
 def export_csv_zip() -> bytes:
@@ -877,7 +1111,7 @@ def is_empty() -> bool:
     下次打開又看到歡迎畫面，會以為資料不見了。
     """
     with get_connection() as conn:
-        for table in ["expenses", "fixed_expenses", "debts", "holdings", "trades"]:
+        for table in ["expenses", "fixed_expenses", "debts", "receivables", "credit_cards", "holdings", "trades"]:
             if conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
                 return False
         # 開了第二個帳戶，或帳戶裡有錢，也算開始使用了
