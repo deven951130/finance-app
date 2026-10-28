@@ -396,3 +396,22 @@ def test_信用卡_新增卡片和填帳單(seeded):
     assert not at.exception
     assert [(b["month"], b["amount"]) for b in db.get_card_bills() if b["card_id"] == card["id"]] \
         == [(date.today().isoformat()[:7], 1800)]
+
+
+def test_記帳選信用卡付款_加到帳單不扣帳戶(seeded):
+    card = db.get_cards()[0]
+    at = make_app("page_expenses").run()
+    assert not at.exception
+    # 記帳頁的「支出」表單（側邊欄的「記一筆」也有同樣的欄位，用 form_id 分開）
+    next(x for x in at.selectbox if x.form_id == "add_expense" and x.label.startswith("從哪裡付")) \
+        .set_value(("card", card["id"]))
+    next(n for n in at.number_input if n.form_id == "add_expense" and n.label == "金額").set_value(450)
+    next(b for b in at.button if b.form_id == "add_expense" and b.label == "記下來").click()
+    at.run()
+    assert not at.exception
+    # 這個月刷的算下個月的帳單；現金沒有扣
+    assert [b["amount"] for b in db.get_card_bills() if b["month"] > date.today().isoformat()[:7]] == [450]
+    assert db.get_settings()["cash_on_hand"] == 50000
+    # 明細的帳戶欄顯示卡名
+    at = make_app("page_expenses").run()
+    assert any("範例卡" in m.value for m in at.markdown)

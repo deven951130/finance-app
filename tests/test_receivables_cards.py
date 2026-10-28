@@ -8,7 +8,8 @@ from datetime import date
 import pytest
 
 import db
-from models.cards import bill_status, due_date, month_total, unpaid, unpaid_total
+from models.cards import (bill_from_records, bill_month, bill_status, card_cashflow, due_date, month_total,
+                          unpaid, unpaid_total)
 from models.receivables import collect_amount, collected_ratio, outstanding_total
 
 
@@ -156,3 +157,57 @@ def test_新的表也會匯出和算進有沒有資料(temp_db):
     assert db.is_empty()
     db.add_card("範例卡", 15)
     assert not db.is_empty()
+
+
+# ---------- 記帳刷卡 ----------
+
+def test_刷卡算進下個月的帳單():
+    assert bill_month("2026-10-28") == "2026-11"
+    assert bill_month("2026-12-01") == "2027-01"
+
+
+def test_每月現金流的卡費_扣掉記帳刷卡的部分():
+    bills = [{"month": "2026-11", "amount": 5000, "paid": 0}]
+    records = [{"date": "2026-10-03", "amount": 1200}, {"date": "2026-10-20", "amount": 800},
+               {"date": "2026-11-02", "amount": 999}]  # 這筆算 12 月
+    assert bill_from_records(records, "2026-11") == 2000
+    assert card_cashflow(bills, records, "2026-11") == 3000
+    assert card_cashflow([], records, "2026-11") == 0  # 帳單被改得比記帳少，不會變負的
+
+
+def test_記帳選信用卡_累加到帳單_不扣帳戶(temp_db):
+    card = db.add_card("範例卡", 15)
+    db.add_expense(300, "吃飯", "2026-10-05", "", card_id=card)
+    db.add_expense(200, "交通", "2026-10-06", "", card_id=card)
+    bill = db.get_card_bills()[0]
+    assert (bill["month"], bill["amount"]) == ("2026-11", 500)
+    assert db.get_settings()["cash_on_hand"] == 10000
+    assert [r["amount"] for r in db.get_card_records()] == [300, 200]
+
+
+def test_修改刷卡的記帳_帳單跟著改(temp_db):
+    card = db.add_card("範例卡", 15)
+    db.add_expense(300, "吃飯", "2026-10-05", "", card_id=card)
+    eid = db.get_card_records()[0]["id"]
+    # 金額改成 450、日期改到 11 月：11 月帳單變回 0，12 月帳單 450
+    db.update_expense(eid, 450, "吃飯", "2026-11-02", "", card_id=card)
+    assert {b["month"]: b["amount"] for b in db.get_card_bills()} == {"2026-11": 0, "2026-12": 450}
+    # 改成用現金付：帳單扣掉、現金扣錢
+    db.update_expense(eid, 450, "吃飯", "2026-11-02", "", account_id=db.default_account_id())
+    assert {b["month"]: b["amount"] for b in db.get_card_bills()} == {"2026-11": 0, "2026-12": 0}
+    assert db.get_settings()["cash_on_hand"] == 9550
+
+
+def test_刪除刷卡的記帳_帳單扣回來(temp_db):
+    card = db.add_card("範例卡", 15)
+    db.add_expense(300, "吃飯", "2026-10-05", "", card_id=card)
+    db.delete_expense(db.get_card_records()[0]["id"])
+    assert db.get_card_bills()[0]["amount"] == 0
+
+
+def test_刪除信用卡_記帳還在(temp_db):
+    card = db.add_card("範例卡", 15)
+    db.add_expense(300, "吃飯", "2026-10-05", "", card_id=card)
+    db.delete_card(card)
+    assert db.get_card_records() == []
+    assert len(db.get_records_in_month(2026, 10)) == 1

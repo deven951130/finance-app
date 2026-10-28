@@ -38,7 +38,7 @@ from models.budget import (
     remaining_this_month,
     spent_by_category,
 )
-from models.cards import bill_status, due_date, month_total, unpaid, unpaid_total
+from models.cards import bill_status, card_cashflow, due_date, month_total, unpaid, unpaid_total
 from models.cashflow import monthly_savings, total_debt_payment
 from models.debt import add_months, months_left, paid_in_month, payment_this_period, payoff_month
 from models.dca import monthly_withdrawal, project
@@ -424,6 +424,11 @@ def account_names() -> dict[int, str]:
     return {a["id"]: a["name"] for a in db.get_accounts()}
 
 
+def card_names() -> dict[int, str]:
+    """{信用卡 id: 名稱}，明細列表顯示「用哪張卡刷的」用。"""
+    return {c["id"]: c["name"] for c in db.get_cards()}
+
+
 def account_select(label: str, key: str | None = None, allow_none: bool = False,
                    default: int | None = None, none_label: str = "不屬於任何帳戶") -> int | None:
     """選帳戶的下拉選單，旁邊顯示目前餘額。回傳帳戶 id。
@@ -442,6 +447,34 @@ def account_select(label: str, key: str | None = None, allow_none: bool = False,
     )
 
 
+def payer_select(label: str, key: str | None = None, allow_none: bool = False,
+                 account_id: int | None = None, card_id: int | None = None) -> tuple[int | None, int | None]:
+    """支出「從哪裡付」的下拉選單：帳戶（旁邊顯示餘額）和信用卡放在同一個選單。回傳 (帳戶 id, 卡 id)，只有一個不是 None。
+
+    選項是 ("account", id) 或 ("card", id) 這種 tuple：tuple 可以直接當選項，
+    跟 C++ 的 std::pair 一樣，比把兩種 id 混成一個字串再拆開清楚。
+    刷卡的支出不扣帳戶，加到那張卡下個月的帳單。
+    """
+    accounts = {a["id"]: a for a in db.get_accounts()}
+    cards = {c["id"]: c["name"] for c in db.get_cards()}
+    options = [("account", i) for i in accounts] + [("card", i) for i in cards]
+    if allow_none:
+        options.append(("account", None))
+    current = ("card", card_id) if card_id is not None else ("account", account_id)
+    index = options.index(current) if current in options else 0
+
+    def label_of(option: tuple[str, int | None]) -> str:
+        kind, i = option
+        if i is None:
+            return "不屬於任何帳戶"
+        if kind == "card":
+            return f"💳 {cards[i]}（刷卡，算進下個月帳單）"
+        return f"{accounts[i]['name']}（{money(accounts[i]['balance'])}）"
+
+    kind, i = st.selectbox(label, options, index=index, key=key, format_func=label_of)
+    return (None, i) if kind == "card" else (i, None)
+
+
 def record_form(key: str, kind: str, with_date: bool = True) -> None:
     """新增一筆記帳的表單（記帳頁和側邊欄「記一筆」共用）。kind 是 "expense" 或 "income"。
 
@@ -452,7 +485,10 @@ def record_form(key: str, kind: str, with_date: bool = True) -> None:
     with st.form(key, clear_on_submit=True, border=False):
         amount = st.number_input("金額", min_value=0.0, step=10.0, format="%.0f")
         option = st.selectbox("類別", category_options(kind))
-        account_id = account_select("存入帳戶" if income else "從哪個帳戶付")
+        if income:
+            account_id, card_id = account_select("存入帳戶"), None
+        else:
+            account_id, card_id = payer_select("從哪裡付（帳戶或信用卡）")
         when = st.date_input("日期", value=date.today()) if with_date else date.today()
         note = st.text_input("備註（可不填）")
         submitted = st.form_submit_button("記下來", type="primary", icon=":material/check:", width="stretch")
@@ -461,8 +497,10 @@ def record_form(key: str, kind: str, with_date: bool = True) -> None:
             st.warning("金額要大於 0")
         else:
             main, sub = split_option(option)
-            db.add_expense(amount, main, when.isoformat(), note, subcategory=sub, account_id=account_id, kind=kind)
-            done(f"已記下{'收入' if income else ''}：{option} {money(amount)}（{account_names()[account_id]}）")
+            db.add_expense(amount, main, when.isoformat(), note, subcategory=sub, account_id=account_id, kind=kind,
+                           card_id=card_id)
+            payer = card_names()[card_id] + " 刷卡" if card_id else account_names()[account_id]
+            done(f"已記下{'收入' if income else ''}：{option} {money(amount)}（{plain(payer)}）")
 
 
 def summary_strip(key: str, n: int) -> list:
@@ -689,7 +727,8 @@ def page_overview() -> None:
     fixed_total = sum(item["amount"] for item in db.get_fixed_expenses())
     debt_payment = total_debt_payment(debts)
     living = sum(db.get_budgets().values())
-    card_month = month_total(card_bills, today.isoformat()[:7])  # 這個月的卡費（還沒填帳單就是 0）
+    # 這個月的卡費，扣掉記帳刷卡的部分（那些已經算在生活預算裡了，見 models/cards.card_cashflow）
+    card_month = card_cashflow(card_bills, db.get_card_records(), today.isoformat()[:7])
     savings = monthly_savings(income, fixed_total, debt_payment, living, card_month)
 
     left, right = st.columns([3, 2])
@@ -715,7 +754,7 @@ def page_overview() -> None:
             ("", "收入", money(income)),
             ("#6C8EBF", "− 固定支出", money(fixed_total)),
             ("#8A6FB0", "− 負債還款", money(debt_payment)),
-            (CARD_COLOR, f"− 信用卡費<span class=\"sub\">{today.month} 月帳單</span>", money(card_month)),
+            (CARD_COLOR, f"− 信用卡費<span class=\"sub\">{today.month} 月帳單裡記帳沒記到的</span>", money(card_month)),
             ("#B7B1A5", "− 生活預算", money(living)),
             (GOLD, "= 每月可存", money(savings)),
         ])
@@ -838,6 +877,7 @@ def page_expenses() -> None:
             st.info(f"{word}還沒有記帳")
         else:
             names = account_names()
+            cards = card_names()
             widths = [1.8, 2.6, 1.8, 1.6, 2.6, 1.4]  # st.columns 的寬度比例，表頭和每一列共用
             for col, text in zip(st.columns(widths), ["日期", "類別", "金額", "帳戶", "備註", ""]):
                 col.caption(text)
@@ -851,7 +891,10 @@ def page_expenses() -> None:
                     col3.markdown(f'<b style="color:{GOLD_TEXT}">+{money(e["amount"])}</b>', unsafe_allow_html=True)
                 else:
                     col3.write(f"**{money(e['amount'])}**")
-                col4.write(plain(names.get(e["account_id"], "—")))
+                if e["card_id"] is not None:
+                    col4.write("💳 " + plain(cards.get(e["card_id"], "信用卡")))
+                else:
+                    col4.write(plain(names.get(e["account_id"], "—")))
                 col5.write(plain(e["note"] or ""))
                 # 每個按鈕需要唯一的 key，所以用記帳的 id
                 with col6:
@@ -878,7 +921,11 @@ def edit_expense(e: dict) -> None:
             if current not in options:
                 options = [current] + options
             option = st.selectbox("類別", options, index=options.index(current))
-            account_id = account_select("帳戶", allow_none=True, default=e["account_id"])
+            if e["kind"] == "income":
+                account_id, card_id = account_select("帳戶", allow_none=True, default=e["account_id"]), None
+            else:
+                account_id, card_id = payer_select("從哪裡付", allow_none=True,
+                                                   account_id=e["account_id"], card_id=e["card_id"])
             new_date = st.date_input("日期", value=date.fromisoformat(e["date"]))
             note = st.text_input("備註", value=e["note"] or "")
             if st.form_submit_button("儲存", type="primary", icon=":material/save:"):
@@ -887,7 +934,7 @@ def edit_expense(e: dict) -> None:
                 else:
                     main, sub = split_option(option)
                     db.update_expense(e["id"], amount, main, new_date.isoformat(), note,
-                                      subcategory=sub, account_id=account_id)
+                                      subcategory=sub, account_id=account_id, card_id=card_id)
                     done("已修改")
 
 
@@ -1345,7 +1392,7 @@ def page_cards() -> None:
     m1, m2, m3 = summary_strip("cards", 3)
     m1.metric("還沒繳的卡費", money(unpaid_total(bills)), help="總覽的淨資產會減掉這個數字")
     m2.metric(f"{today.month} 月帳單合計", money(month_total(bills, this_month)),
-              help="每月現金流會扣掉這個數字")
+              help="記帳刷卡的部分已經算在生活預算裡，每月現金流只扣其他的")
     m3.metric("信用卡", f"{len(cards)} 張")
     alerts = card_bill_alerts(bills, today)
     if alerts:
@@ -2076,7 +2123,7 @@ def sidebar_summary() -> None:
         sum(item["amount"] for item in db.get_fixed_expenses()),
         total_debt_payment(db.get_debts()),
         sum(budgets.values()),
-        month_total(db.get_card_bills(), today.isoformat()[:7]),
+        card_cashflow(db.get_card_bills(), db.get_card_records(), today.isoformat()[:7]),
     )
     st.sidebar.markdown(f"""
 <div class="side-sum">

@@ -111,6 +111,9 @@ def main() -> None:
     db.pay_card_bill(db.get_card_bills()[0]["id"], 4200, bank, last + "-12")
     db.set_card_bill(card_a, this_month, 3680)
     db.set_card_bill(card_b, this_month, 1290)
+    # 本月用 A 卡刷的記帳：不扣帳戶，自動加到 A 卡下個月的帳單
+    db.add_expense(680, "約會禮物", day(6), "生日禮物", subcategory="禮物", card_id=card_a)
+    db.add_expense(399, "其他", day(7), "網購", subcategory="其他", card_id=card_a)
 
     # 持股（台積電放在兩個帳戶，示範合併；範例股價都是虛構的）
     db.add_holding("台積電", "2330", "A 證券", 20, 820, 1000)
