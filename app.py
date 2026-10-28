@@ -1,5 +1,5 @@
 """
-個人理財管理系統：Streamlit 主程式。
+OniPulsar 星脈流轉（原名「個人理財」）：Streamlit 主程式。
 
 執行方式：streamlit run app.py
 
@@ -18,15 +18,21 @@ Streamlit 的運作方式和一般程式不太一樣：
 import html
 import os
 import re
-from datetime import date
+import time
+from datetime import date, datetime
 
 import altair as alt  # 安裝 streamlit 時會一起裝好，用來畫圖表
 import pandas as pd  # 安裝 streamlit 時會一起裝好，用來顯示表格
 import streamlit as st
 
 import db
+import quotes
+import update_check
 from models.budget import (
     CATEGORIES,
+    category_options,
+    join_option,
+    split_option,
     last_n_months,
     monthly_totals,
     remaining_this_month,
@@ -36,11 +42,14 @@ from models.cashflow import monthly_savings, total_debt_payment
 from models.debt import months_left, paid_in_month, payment_this_period, payoff_month
 from models.dca import monthly_withdrawal, project
 from models.precheck import CHECK_ITEMS, check_order
-from models.stocks import CONCENTRATION_LIMIT, analyze, over_concentrated
+from models.fees import realized_pnl
+from models.quotes import is_trading_time, normalize_symbol
+from version import APP_VERSION
+from models.stocks import CONCENTRATION_LIMIT, analyze, over_concentrated, profit_totals
 from models.trades import TRADE_TYPES, count_day_trades, total_pnl
 
 # 頁面基本設定（必須是第一個 st. 指令）
-st.set_page_config(page_title="個人理財", page_icon="💰", layout="wide")
+st.set_page_config(page_title="OniPulsar 星脈流轉", page_icon="💰", layout="wide")
 
 # 確保資料表存在
 db.init_db()
@@ -75,9 +84,12 @@ MUTED = "#5F6672"    # 次要文字：灰（對存摺紙底色約 5:1）
 CHART_COLORS = ["#2B4C7E", "#C9973F", "#6C8EBF", "#8A6FB0", "#4F9A94", "#B7B1A5"]
 
 # 每個記帳類別一個顏色，和「預算分配」圓餅圖用同一組，看圖就知道哪一塊是哪個類別。
-# 刻意不用墨藍和金色：這兩個顏色在預算進度條上代表「正常」和「快用完」，避免同一個顏色有兩種意思
-# （dict(zip(...)) 把兩個清單一對一配成字典，像 C++ 用兩個陣列建 std::map）
-CATEGORY_COLORS = dict(zip(CATEGORIES, ["#6C8EBF", "#8A6FB0", "#4F9A94", "#B7B1A5"]))
+# 刻意不用墨藍和金色：這兩個顏色在預算進度條上代表「正常」和「快用完」，避免同一個顏色有兩種意思；
+# 也不用紅、綠：這兩個顏色留給漲跌。原本四個類別的顏色不變，新加的五個用柔和的顏色
+CATEGORY_COLORS = {
+    "吃飯": "#6C8EBF", "交通": "#4F9A94", "購物": "#B07AA1", "居家": "#7D8A9E", "娛樂": "#5FA8C9",
+    "約會禮物": "#8A6FB0", "醫療保健": "#9C8F6E", "學習": "#7E8FC4", "其他": "#B7B1A5",
+}
 
 # 金額用的字型：宋體。思源宋體由 config.toml 的 headingFont 載入；
 # 沒網路時依序改用 Windows 的新細明體、Mac 的宋體
@@ -394,10 +406,59 @@ def budget_bar(label: str, spent: float, budget: float) -> None:
     progress_bar(label, spent, budget, color, note, ratio)
 
 
-def category_label(category: str) -> str:
-    """類別名稱前面加上它的顏色圓點（HTML）。顏色和「預算分配」圓餅圖一致。"""
-    color = CATEGORY_COLORS.get(category, MUTED)
-    return f'<span class="dot" style="background:{color}"></span>{html.escape(category)}'
+def category_label(category: str, sub: str | None = None, income: bool = False) -> str:
+    """類別名稱前面加上它的顏色圓點（HTML），有細項時接在後面的灰色小字。
+
+    顏色和「預算分配」圓餅圖一致；收入一律用金色圓點（收入沒有預算、也不參加支出的圓餅圖）。
+    """
+    color = GOLD if income else CATEGORY_COLORS.get(category, MUTED)
+    extra = f'<span style="color:{MUTED}"> · {html.escape(sub)}</span>' if sub else ""
+    return f'<span class="dot" style="background:{color}"></span>{html.escape(category)}{extra}'
+
+
+def account_names() -> dict[int, str]:
+    """{帳戶 id: 名稱}，明細列表顯示「從哪個帳戶」用。"""
+    return {a["id"]: a["name"] for a in db.get_accounts()}
+
+
+def account_select(label: str, key: str | None = None, allow_none: bool = False,
+                   default: int | None = None) -> int | None:
+    """選帳戶的下拉選單，旁邊顯示目前餘額。回傳帳戶 id。
+
+    選項用 id（數字）而不是整個帳戶資料：餘額變了選項也不會變，選到的帳戶不會被重設。
+    allow_none=True 時多一個「不屬於任何帳戶」（舊的記帳沒有帳戶，修改時要能保持原狀）。
+    """
+    accounts = {a["id"]: a for a in db.get_accounts()}
+    ids = list(accounts) + ([None] if allow_none else [])
+    index = ids.index(default) if default in ids else 0
+    return st.selectbox(
+        label, ids, index=index, key=key,
+        format_func=lambda i: "不屬於任何帳戶" if i is None
+        else f"{accounts[i]['name']}（{money(accounts[i]['balance'])}）",
+    )
+
+
+def record_form(key: str, kind: str, with_date: bool = True) -> None:
+    """新增一筆記帳的表單（記帳頁和側邊欄「記一筆」共用）。kind 是 "expense" 或 "income"。
+
+    類別是「主類別 · 細項」攤平的一個選單（見 models/budget.py 的 category_options），
+    因為表單裡選了主類別不會馬上更新第二個選單。記下來時同時更新選到的帳戶餘額。
+    """
+    income = kind == "income"
+    with st.form(key, clear_on_submit=True, border=False):
+        amount = st.number_input("金額", min_value=0.0, step=10.0, format="%.0f")
+        option = st.selectbox("類別", category_options(kind))
+        account_id = account_select("存入帳戶" if income else "從哪個帳戶付")
+        when = st.date_input("日期", value=date.today()) if with_date else date.today()
+        note = st.text_input("備註（可不填）")
+        submitted = st.form_submit_button("記下來", type="primary", icon=":material/check:", width="stretch")
+    if submitted:
+        if amount <= 0:
+            st.warning("金額要大於 0")
+        else:
+            main, sub = split_option(option)
+            db.add_expense(amount, main, when.isoformat(), note, subcategory=sub, account_id=account_id, kind=kind)
+            done(f"已記下{'收入' if income else ''}：{option} {money(amount)}（{account_names()[account_id]}）")
 
 
 def summary_strip(key: str, n: int) -> list:
@@ -475,6 +536,63 @@ def delete_button(key: str, label: str = "刪除") -> bool:
     return st.button(label, key=key, type="tertiary", icon=":material/delete:", help="刪除這一筆")
 
 
+# ---------- 股價自動更新 ----------
+
+QUOTE_TTL = 300  # 秒：5 分鐘內重複打開頁面不再連網路，用上一次抓到的
+
+
+@st.cache_data(ttl=QUOTE_TTL, show_spinner=False)
+def cached_quotes(symbols: tuple[str, ...]) -> tuple[quotes.QuoteResult, float]:
+    """抓股價並記住 5 分鐘（st.cache_data：同樣的參數在期限內直接回傳上次的結果，不重抓）。
+
+    回傳 (結果, 抓的時間)。抓的時間要一起記住：5 分鐘內重跑頁面時，顯示的仍是真正抓的那一刻。
+    """
+    return quotes.fetch_prices(list(symbols)), time.time()
+
+
+def refresh_quotes(force: bool = False) -> None:
+    """打開總覽或持股頁時呼叫：自動更新所有持股的現價。
+
+    - 設定頁關掉「自動更新股價」時什麼都不做（force=True 是按了「立即更新」，照樣抓）
+    - 沒有持股就不連網路
+    - 抓不到時保留原本的價格，原因放進 session_state，持股頁會顯示
+    """
+    settings = db.get_settings()
+    if not settings.get("auto_quotes", 1) and not force:
+        return
+    symbols = tuple(sorted({h["symbol"] for h in db.get_holdings()}))
+    if not symbols:
+        return
+    if force:
+        cached_quotes.clear()
+    with st.spinner("更新股價中…"):
+        result, fetched_at = cached_quotes(symbols)
+    st.session_state["quote_result"] = result
+    if result.prices:
+        db.update_prices(result.prices)
+        d = result.quote_date
+        db.save_settings({
+            "quotes_fetched_at": fetched_at,
+            "quotes_date": d.year * 10000 + d.month * 100 + d.day if d else 0.0,
+            "quotes_realtime": 1.0 if result.source == "realtime" else 0.0,
+        })
+
+
+def quote_status() -> str:
+    """現價是什麼時候的，例如「10/21 11:46 盤中即時」「10/20 收盤價」。還沒抓過回傳空字串。"""
+    s = db.get_settings()
+    if not s.get("quotes_fetched_at"):
+        return ""
+    fetched = datetime.fromtimestamp(s["quotes_fetched_at"])
+    n = int(s.get("quotes_date") or 0)
+    quote_day = date(n // 10000, n // 100 % 100, n % 100) if n else fetched.date()
+    if s.get("quotes_realtime") and quote_day == fetched.date():
+        if is_trading_time(fetched):
+            return f"{fetched.month}/{fetched.day} {fetched:%H:%M} 盤中即時（約延遲幾秒）"
+        return f"{quote_day.month}/{quote_day.day} 收盤價"
+    return f"{quote_day.month}/{quote_day.day} 收盤價"
+
+
 # ---------- 頁面：總覽 ----------
 
 def welcome() -> None:
@@ -491,7 +609,7 @@ def welcome() -> None:
         unsafe_allow_html=True,
     )
     steps = [
-        ("1", "填收入和現金", "每月收入、手上現金、緊急預備金目標。", "settings", "前往設定"),
+        ("1", "開帳戶、填收入", "現金、銀行戶頭各開一個帳戶，填上現在的餘額；每月收入在設定頁。", "accounts", "前往帳戶"),
         ("2", "設定每月預算", "吃飯、交通……每個類別最多花多少。", "budgets", "設定預算"),
         ("3", "開始記帳", "每花一筆就記一筆，也可以用左邊的「記一筆」。", "expenses", "去記帳"),
     ]
@@ -511,11 +629,12 @@ def page_overview() -> None:
         welcome()
         return
 
+    refresh_quotes()  # 淨資產裡的股票市值要用最新的價格算
     settings = db.get_settings()
     cash = settings["cash_on_hand"]
     analyzed = analyze(db.get_holdings())
     total_value = sum(m["value"] for m in analyzed)
-    total_profit = sum(m["profit"] for m in analyzed)
+    total_profit = profit_totals(analyzed)[0]  # 沒填均價的個股不算進損益
     debts = db.get_debts()
     total_debt = sum(d["remaining"] for d in debts)
 
@@ -523,7 +642,9 @@ def page_overview() -> None:
     stock_label = "+ 股票市值"
     if total_profit:
         stock_label += f'<span class="sub">損益 {colored_money_html(total_profit)}</span>'
-    hero_rows = ledger_html([("", "手上現金", money(cash)),
+    if analyzed and quote_status():
+        stock_label += f'<span class="sub" style="color:{MUTED}">{quote_status()}</span>'
+    hero_rows = ledger_html([("", "帳戶存款", money(cash)),
                              ("", stock_label, money(total_value)),
                              ("", "− 負債餘額", money(total_debt))], total=False)
     st.markdown(
@@ -642,28 +763,18 @@ def networth_trend() -> None:
 
 def page_expenses() -> None:
     today = date.today()
-    page_header("記帳", "隨手記下每一筆花費，月底就知道錢去哪了")
+    page_header("記帳", "花出去的、收進來的都記下，帳戶餘額會跟著變")
 
     form_col, stat_col = st.columns([2, 3])
 
     with form_col, st.container(key="card_add_expense"):
         card_title("新增一筆")
-        # st.form：把多個輸入框包在一起，按下送出才一次處理
-        # clear_on_submit=True：送出後清空輸入框，方便記下一筆
-        with st.form("add_expense", clear_on_submit=True, border=False):
-            amount = st.number_input("金額", min_value=0.0, step=10.0, format="%.0f")
-            category = st.selectbox("類別", CATEGORIES)
-            expense_date = st.date_input("日期", value=today)
-            note = st.text_input("備註（可不填）")
-            submitted = st.form_submit_button("新增", type="primary", icon=":material/add:")
-
-        if submitted:
-            if amount <= 0:
-                st.warning("金額要大於 0")
-            else:
-                # date 物件轉成 'YYYY-MM-DD' 字串存進資料庫
-                db.add_expense(amount, category, expense_date.isoformat(), note)
-                done(f"已記下：{category} {money(amount)}")
+        # 支出和收入分兩個分頁，類別選單不一樣（收入沒有預算）
+        tab_out, tab_in = st.tabs(["支出", "收入"])
+        with tab_out:
+            record_form("add_expense", "expense")
+        with tab_in:
+            record_form("add_income", "income")
 
     # --- 選月份：預設本月，也可以回頭看以前的月份 ---
     this_month = f"{today.year:04d}-{today.month:02d}"
@@ -677,12 +788,14 @@ def page_expenses() -> None:
         is_this_month = ym == this_month
         word = "本月" if is_this_month else "當月"
 
-        month_expenses = db.get_expenses_in_month(year, month)
+        records = db.get_records_in_month(year, month)
+        month_expenses = [r for r in records if r["kind"] == "expense"]  # 預算、還能花多少只看支出
         budgets = db.get_budgets()
         remaining = remaining_this_month(budgets, month_expenses)
         total_spent = sum(e["amount"] for e in month_expenses)
+        total_income = sum(r["amount"] for r in records if r["kind"] == "income")
 
-        m1, m2 = summary_strip("expenses", 2)
+        m1, m2, m3 = summary_strip("expenses", 3)
         label = f"{word}還能花" if is_this_month else "比預算剩下"
         if remaining >= 0:
             m1.metric(label, money(remaining))
@@ -691,6 +804,10 @@ def page_expenses() -> None:
             m1.metric(label, money(remaining), delta="已超支",
                       delta_color="orange", delta_arrow="off")
         m2.metric(f"{word}已花", money(total_spent))
+        # 收入減支出 = 這個月存下（或花掉）多少。不用紅綠（紅綠留給漲跌），只用文字說明
+        net = total_income - total_spent
+        m3.metric(f"{word}收入", money(total_income),
+                  delta=f"收支{'結餘' if net >= 0 else '不足'} {money(abs(net))}", delta_color="off", delta_arrow="off")
 
         with st.container(key="card_budget_bars"):
             card_title(f"{year} 年 {month} 月各類別")
@@ -700,21 +817,28 @@ def page_expenses() -> None:
 
     # --- 當月明細 ---
     with st.container(key="card_expense_list"):
-        card_title(f"{word}明細", f"共 {len(month_expenses)} 筆")
-        if not month_expenses:
+        card_title(f"{word}明細", f"共 {len(records)} 筆")
+        if not records:
             st.info(f"{word}還沒有記帳")
         else:
-            widths = [2, 2, 2, 4, 1.4]  # st.columns 的寬度比例，表頭和每一列共用
-            for col, text in zip(st.columns(widths), ["日期", "類別", "金額", "備註", ""]):
+            names = account_names()
+            widths = [1.8, 2.6, 1.8, 1.6, 2.6, 1.4]  # st.columns 的寬度比例，表頭和每一列共用
+            for col, text in zip(st.columns(widths), ["日期", "類別", "金額", "帳戶", "備註", ""]):
                 col.caption(text)
-            for e in month_expenses:
-                col1, col2, col3, col4, col5 = st.columns(widths, vertical_alignment="center")
+            for e in records:
+                income = e["kind"] == "income"
+                col1, col2, col3, col4, col5, col6 = st.columns(widths, vertical_alignment="center")
                 col1.write(e["date"])
-                col2.markdown(category_label(e["category"]), unsafe_allow_html=True)
-                col3.write(f"**{money(e['amount'])}**")
-                col4.write(plain(e["note"] or ""))
-                # 每個按鈕需要唯一的 key，所以用支出的 id
-                with col5:
+                col2.markdown(category_label(e["category"], e["subcategory"], income), unsafe_allow_html=True)
+                # 收入前面加「+」、用金色；支出照舊。不用紅綠（紅綠留給漲跌）
+                if income:
+                    col3.markdown(f'<b style="color:{GOLD_TEXT}">+{money(e["amount"])}</b>', unsafe_allow_html=True)
+                else:
+                    col3.write(f"**{money(e['amount'])}**")
+                col4.write(plain(names.get(e["account_id"], "—")))
+                col5.write(plain(e["note"] or ""))
+                # 每個按鈕需要唯一的 key，所以用記帳的 id
+                with col6:
                     edit_col, del_col = st.columns(2, gap="small")
                     with edit_col:
                         edit_expense(e)
@@ -732,15 +856,22 @@ def edit_expense(e: dict) -> None:
         with st.form(f"edit_exp_{e['id']}", border=False):
             amount = st.number_input("金額", min_value=0.0, step=10.0, format="%.0f",
                                      value=float(e["amount"]))
-            category = st.selectbox("類別", CATEGORIES,
-                                    index=CATEGORIES.index(e["category"]) if e["category"] in CATEGORIES else 0)
+            # 舊的記帳只有主類別（沒有細項），把它放在選單最前面，修改時才不會被改掉
+            options = category_options(e["kind"])
+            current = join_option(e["category"], e["subcategory"])
+            if current not in options:
+                options = [current] + options
+            option = st.selectbox("類別", options, index=options.index(current))
+            account_id = account_select("帳戶", allow_none=True, default=e["account_id"])
             new_date = st.date_input("日期", value=date.fromisoformat(e["date"]))
             note = st.text_input("備註", value=e["note"] or "")
             if st.form_submit_button("儲存", type="primary", icon=":material/save:"):
                 if amount <= 0:
                     st.warning("金額要大於 0")
                 else:
-                    db.update_expense(e["id"], amount, category, new_date.isoformat(), note)
+                    main, sub = split_option(option)
+                    db.update_expense(e["id"], amount, main, new_date.isoformat(), note,
+                                      subcategory=sub, account_id=account_id)
                     done("已修改")
 
 
@@ -865,113 +996,228 @@ def page_fixed() -> None:
                         st.rerun()
 
 
+# ---------- 頁面：帳戶 ----------
+
+def page_accounts() -> None:
+    """銀行帳戶：每個帳戶各自的餘額。記帳、還債時選帳戶，餘額會自動增減。"""
+    page_header("帳戶", "現金、銀行戶頭各自記；記帳和還債時選帳戶，餘額會跟著變")
+    accounts = db.get_accounts()
+    total = sum(a["balance"] for a in accounts)
+
+    m1, m2 = summary_strip("accounts", 2)
+    m1.metric("全部帳戶合計", money(total), help="總覽的淨資產用這個數字")
+    m2.metric("帳戶數", f"{len(accounts)} 個")
+
+    list_col, form_col = st.columns([3, 2])
+    with list_col, st.container(key="card_account_list"):
+        card_title("各帳戶餘額")
+        for a in accounts:
+            col1, col2, col3 = st.columns([3, 3, 1.4], vertical_alignment="center")
+            col1.markdown(f"**{plain(a['name'])}**")
+            # 負數（例如信用卡、透支）用橘色提醒；紅綠留給漲跌
+            text = money(a["balance"])
+            col2.markdown(f'<div style="text-align:right;font-family:{SERIF};font-size:1.15rem'
+                          f'{";color:" + WARN if a["balance"] < 0 else ""}">{text}</div>', unsafe_allow_html=True)
+            with col3:
+                with st.popover("", icon=":material/edit:", help="改名、校正餘額、刪除", type="tertiary"):
+                    with st.form(f"acc_edit_{a['id']}", border=False):
+                        name = st.text_input("名稱", value=a["name"])
+                        balance = st.number_input("餘額（和銀行 App 上的數字不一樣時校正）", step=100.0,
+                                                  format="%.0f", value=float(a["balance"]))
+                        if st.form_submit_button("儲存", type="primary", icon=":material/save:"):
+                            if not name.strip():
+                                st.warning("請輸入名稱")
+                            else:
+                                db.rename_account(a["id"], name.strip())
+                                db.set_account_balance(a["id"], balance)
+                                done(f"已更新：{plain(name.strip())}")
+                    if len(accounts) > 1 and st.button("刪除這個帳戶", key=f"acc_del_{a['id']}",
+                                                       icon=":material/delete:"):
+                        db.delete_account(a["id"])
+                        done(f"已刪除：{plain(a['name'])}（記帳紀錄還在）")
+
+    with form_col:
+        with st.container(key="card_add_account"):
+            card_title("開一個帳戶")
+            with st.form("add_account", clear_on_submit=True, border=False):
+                name = st.text_input("名稱（例如 台新銀行、郵局、悠遊卡）")
+                balance = st.number_input("現在的餘額", step=1000.0, format="%.0f")
+                if st.form_submit_button("開戶", type="primary", icon=":material/add:"):
+                    name = name.strip()
+                    if not name:
+                        st.warning("請輸入名稱")
+                    elif name in [a["name"] for a in accounts]:
+                        st.warning("已經有同名的帳戶")
+                    else:
+                        db.add_account(name, balance)
+                        done(f"已開戶：{plain(name)}")
+
+        if len(accounts) > 1:
+            with st.container(key="card_transfer"):
+                card_title("轉帳", "例如從銀行領錢出來")
+                with st.form("transfer", clear_on_submit=True, border=False):
+                    src = account_select("從")
+                    dst = account_select("轉到", default=accounts[1]["id"])
+                    amount = st.number_input("金額", min_value=0.0, step=100.0, format="%.0f")
+                    if st.form_submit_button("轉帳", type="primary", icon=":material/swap_horiz:"):
+                        try:
+                            db.transfer(src, dst, amount)
+                        except ValueError as e:
+                            st.warning(str(e))
+                        else:
+                            done(f"已轉帳 {money(amount)}")
+
+
 # ---------- 頁面：負債 ----------
 
 def page_debts() -> None:
-    page_header("負債追蹤", "每還一期按一下，看著餘額慢慢變少")
+    page_header("負債追蹤", "定期還的每期按一下；不限期的有錢就還一筆，看著餘額慢慢變少")
 
     debts = db.get_debts()
-    cash = db.get_settings()["cash_on_hand"]
+    installment = [d for d in debts if d["kind"] != "open"]
     m1, m2, m3 = summary_strip("debts", 3)
     m1.metric("負債餘額", money(sum(d["remaining"] for d in debts)))
-    m2.metric("每月還款", money(total_debt_payment(debts)))
-    m3.metric("手上現金", money(cash), help="按「已還一期」會從這裡扣")
+    m2.metric("每月固定還款", money(total_debt_payment(installment)), help="只算「定期還」的負債")
+    m3.metric("帳戶存款合計", money(db.get_settings()["cash_on_hand"]))
 
     list_col, form_col = st.columns([3, 2])
 
     with form_col, st.container(key="card_add_debt"):
         card_title("新增負債")
         with st.form("add_debt", clear_on_submit=True, border=False):
-            name = st.text_input("名稱（例如 學貸、信用卡分期）")
+            name = st.text_input("名稱（例如 學貸、信用卡分期、跟朋友借）")
+            kind = st.radio("類型", ["定期還", "不限期"], horizontal=True,
+                            captions=["每月固定還一筆", "沒有固定還款，有錢就還"])
             remaining = st.number_input("剩餘金額", min_value=0.0, step=1000.0, format="%.0f")
-            monthly = st.number_input("每月還款", min_value=0.0, step=100.0, format="%.0f")
+            monthly = st.number_input("每月還款（定期還才要填）", min_value=0.0, step=100.0, format="%.0f")
             if st.form_submit_button("新增", type="primary", icon=":material/add:"):
                 name = name.strip()
                 if not name:
                     st.warning("請輸入名稱")
-                elif remaining <= 0 or monthly <= 0:
-                    st.warning("剩餘金額和每月還款都要大於 0")
+                elif remaining <= 0:
+                    st.warning("剩餘金額要大於 0")
+                elif kind == "定期還" and monthly <= 0:
+                    st.warning("定期還的負債要填每月還款")
                 else:
-                    db.add_debt(name, remaining, monthly)
+                    db.add_debt(name, remaining, monthly, "open" if kind == "不限期" else "installment")
                     done(f"已新增：{plain(name)}")  # 重跑讓左邊的清單和上面的數字馬上更新
 
     with list_col:
         if not debts:
             st.info("沒有負債")
             return
+        # 所有還款按鈕都從這個帳戶扣（每張卡片各放一個選單太佔位置）
+        account_id = account_select("還款從哪個帳戶扣", key="debt_pay_account")
 
         today = date.today()
         for d in debts:
             with st.container(key=f"card_debt_{d['id']}"):
-                ym = payoff_month(d["remaining"], d["monthly_payment"], today)
-                if ym is None:
-                    status = chip("已還清", GOLD_TEXT)
-                else:
-                    n = months_left(d["remaining"], d["monthly_payment"])
-                    status = chip(f"還剩 {n} 期・預計 {ym[0]} 年 {ym[1]} 月還清", INK)
-                # 名稱是自己輸入的，用 html.escape 把 < > & 換成安全的寫法，避免畫面壞掉
-                st.markdown(f'<div class="card-title">{html.escape(d["name"])}　{status}</div>',
-                            unsafe_allow_html=True)
-                col1, col2 = st.columns(2)
-                col1.markdown(big_number("剩餘金額", money(d["remaining"])), unsafe_allow_html=True)
-                col2.markdown(big_number("每月還款", money(d["monthly_payment"])), unsafe_allow_html=True)
-
                 payments = db.get_debt_payments(d["id"])
-                b1, b2 = st.columns([3, 1])
-                if ym is not None:
-                    pay = payment_this_period(d["remaining"], d["monthly_payment"])
-                    with b1:
-                        if paid_in_month(payments, today.year, today.month):
-                            # 這個月已經按過了：不直接給「已還一期」按鈕，避免手滑按兩次、多扣一期。
-                            # 真的要提前多還一期（例如一次繳兩期），點開再確認一次
-                            st.markdown(chip(f"本月已還 {payments[0]['date'][5:].replace('-', '/')}", INK),
-                                        unsafe_allow_html=True)
-                            with st.popover("提前再還一期", icon=":material/more_time:"):
-                                st.write(f"這個月已經還過了。確定要再還一期 {money(pay)} 嗎？")
-                                if st.button("確定再還一期", key=f"pay_again_{d['id']}", type="primary"):
-                                    pay_installment(d["id"], pay)
-                        elif st.button(f"已還一期（{money(pay)}）", key=f"pay_{d['id']}",
-                                       type="primary", icon=":material/check:"):
-                            pay_installment(d["id"], pay)
-                with b2:
-                    if delete_button(f"del_debt_{d['id']}"):
-                        db.delete_debt(d["id"])
-                        st.rerun()
-
+                paid_total = sum(p["amount"] for p in payments)
+                if d["kind"] == "open":
+                    open_debt_card(d, payments, paid_total, account_id)
+                else:
+                    installment_card(d, payments, account_id, today)
                 if payments:
-                    with st.expander(f"還款紀錄（{len(payments)} 筆，共 {money(sum(p['amount'] for p in payments))}）"):
-                        ledger_rows = [("", p["date"], money(p["amount"])) for p in payments[:24]]
+                    names = account_names()
+                    with st.expander(f"還款紀錄（{len(payments)} 筆，共 {money(paid_total)}）"):
+                        ledger_rows = [("", f'{p["date"]}<span class="sub">{html.escape(names.get(p["account_id"], ""))}</span>',
+                                        money(p["amount"])) for p in payments[:24]]
                         st.markdown(ledger_html(ledger_rows, total=False), unsafe_allow_html=True)
 
 
-def pay_installment(debt_id: int, pay: float) -> None:
-    """按下「已還一期」：扣負債、扣現金、記一筆還款紀錄。"""
+def installment_card(d: dict, payments: list[dict], account_id: int, today: date) -> None:
+    """定期還的負債：還剩幾期、預計哪個月還清、「已還一期」按鈕。"""
+    ym = payoff_month(d["remaining"], d["monthly_payment"], today)
+    if ym is None:
+        status = chip("已還清", GOLD_TEXT)
+    else:
+        n = months_left(d["remaining"], d["monthly_payment"])
+        status = chip(f"定期還・還剩 {n} 期・預計 {ym[0]} 年 {ym[1]} 月還清", INK)
+    # 名稱是自己輸入的，用 html.escape 把 < > & 換成安全的寫法，避免畫面壞掉
+    st.markdown(f'<div class="card-title">{html.escape(d["name"])}　{status}</div>', unsafe_allow_html=True)
+    col1, col2 = st.columns(2)
+    col1.markdown(big_number("剩餘金額", money(d["remaining"])), unsafe_allow_html=True)
+    col2.markdown(big_number("每月還款", money(d["monthly_payment"])), unsafe_allow_html=True)
+
+    b1, b2 = st.columns([3, 1])
+    if ym is not None:
+        pay = payment_this_period(d["remaining"], d["monthly_payment"])
+        with b1:
+            if paid_in_month(payments, today.year, today.month):
+                # 這個月已經按過了：不直接給「已還一期」按鈕，避免手滑按兩次、多扣一期。
+                # 真的要提前多還一期（例如一次繳兩期），點開再確認一次
+                st.markdown(chip(f"本月已還 {payments[0]['date'][5:].replace('-', '/')}", INK),
+                            unsafe_allow_html=True)
+                with st.popover("提前再還一期", icon=":material/more_time:"):
+                    st.write(f"這個月已經還過了。確定要再還一期 {money(pay)} 嗎？")
+                    if st.button("確定再還一期", key=f"pay_again_{d['id']}", type="primary"):
+                        pay_debt(d["id"], pay, account_id)
+            elif st.button(f"已還一期（{money(pay)}）", key=f"pay_{d['id']}",
+                           type="primary", icon=":material/check:"):
+                pay_debt(d["id"], pay, account_id)
+    with b2:
+        if delete_button(f"del_debt_{d['id']}"):
+            db.delete_debt(d["id"])
+            st.rerun()
+
+
+def open_debt_card(d: dict, payments: list[dict], paid_total: float, account_id: int) -> None:
+    """不限期的負債：沒有每月還款，有錢就「還一筆」，金額自己填。"""
+    status = chip("已還清", GOLD_TEXT) if d["remaining"] <= 0 else chip("不限期", MUTED)
+    st.markdown(f'<div class="card-title">{html.escape(d["name"])}　{status}</div>', unsafe_allow_html=True)
+    col1, col2 = st.columns(2)
+    col1.markdown(big_number("剩餘金額", money(d["remaining"])), unsafe_allow_html=True)
+    col2.markdown(big_number("已經還了", money(paid_total)), unsafe_allow_html=True)
+
+    b1, b2 = st.columns([3, 1])
+    if d["remaining"] > 0:
+        with b1, st.popover("還一筆", icon=":material/payments:"):
+            with st.form(f"pay_open_{d['id']}", border=False):
+                amount = st.number_input("這次還多少", min_value=0.0, max_value=float(d["remaining"]),
+                                         step=100.0, format="%.0f")
+                if st.form_submit_button("還款", type="primary", icon=":material/check:"):
+                    if amount <= 0:
+                        st.warning("金額要大於 0")
+                    else:
+                        pay_debt(d["id"], amount, account_id)
+    with b2:
+        if delete_button(f"del_debt_{d['id']}"):
+            db.delete_debt(d["id"])
+            st.rerun()
+
+
+def pay_debt(debt_id: int, amount: float, account_id: int) -> None:
+    """還款：扣負債、扣選到的帳戶、記一筆還款紀錄（在 db 的同一個交易裡）。"""
     try:
-        db.pay_debt_installment(debt_id)
-    except ValueError as e:  # 現金不夠時，db 會丟出 ValueError，什麼都不扣
+        paid = db.pay_debt(debt_id, amount, account_id)
+    except ValueError as e:  # 帳戶餘額不夠時，db 會丟出 ValueError，什麼都不扣
         st.warning(str(e))
     else:  # 沒有出錯才會走到這裡（try 的 else）
-        done(f"已還一期 {money(pay)}，手上現金也扣掉了")
+        done(f"已還 {money(paid)}，「{plain(account_names()[account_id])}」也扣掉了")
 
 
 # ---------- 頁面：持股 ----------
 
 def page_stocks() -> None:
-    page_header("持股管理", "不同帳戶的同一檔股票會自動合併計算")
+    page_header("持股管理", "不同券商的同一檔股票會自動合併計算，現價自動更新")
 
+    refresh_quotes()
     holdings = db.get_holdings()
     analyzed = analyze(holdings)
+    if holdings:
+        quote_bar()
 
     if analyzed:
         total_value = sum(m["value"] for m in analyzed)
-        total_profit = sum(m["profit"] for m in analyzed)
-        cost = total_value - total_profit
+        total_profit, cost, unknown = profit_totals(analyzed)
         m1, m2, m3 = summary_strip("stocks", 3)
         m1.metric("總市值", money(total_value))
         # delta_color="inverse"：正數紅、負數綠（台股習慣）
         m2.metric("總損益", signed_money(total_profit),
                   delta=f"{total_profit / cost:+.2%}" if cost > 0 else None,
-                  delta_color="inverse")
+                  delta_color="inverse",
+                  help=f"有 {unknown} 檔沒填均價，不知道賺賠多少，沒有算進來" if unknown else None)
         m3.metric("持有檔數", f"{len(analyzed)} 檔")
 
         with st.container(key="card_holdings"):
@@ -979,7 +1225,7 @@ def page_stocks() -> None:
             table = pd.DataFrame([{
                 "名稱": m["name"],
                 "代號": m["symbol"],
-                "帳戶": "、".join(m["accounts"]),
+                "券商": "、".join(m["accounts"]),
                 "股數": m["shares"],
                 "均價": m["avg_price"],
                 "現價": m["price"],
@@ -992,7 +1238,8 @@ def page_stocks() -> None:
                 "還要漲%": "" if m["rise_needed"] is None else f"{m['rise_needed']:.2f}",
             } for m in analyzed])
 
-            # Styler：幫表格上色、設定數字格式
+            # Styler：幫表格上色、設定數字格式。
+            # 沒填均價的個股，均價、損益、報酬率是 None（表格裡變成 NaN），na_rep 讓它顯示成「—」
             styled = (
                 table.style
                 .map(profit_color, subset=["損益", "報酬率%"])
@@ -1000,7 +1247,7 @@ def page_stocks() -> None:
                     "股數": "{:,.0f}", "均價": "{:,.2f}", "現價": "{:,.2f}",
                     "市值": "{:,.0f}", "損益": "{:+,.0f}", "報酬率%": "{:+.2f}",
                     "占比%": "{:.1f}",
-                })
+                }, na_rep="—")
             )
             st.dataframe(styled, hide_index=True)
             over = over_concentrated(analyzed)
@@ -1017,33 +1264,17 @@ def page_stocks() -> None:
             show_donut(weights, "股票", "市值", money(total_value))
 
     with st.container(key="card_add_holding"):
-        card_title("新增持股")
-        with st.form("add_holding", clear_on_submit=True, border=False):
-            col1, col2, col3 = st.columns(3)
-            name = col1.text_input("名稱（例如 台積電）")
-            symbol = col2.text_input("代號（例如 2330）")
-            account = col3.text_input("帳戶（例如 富邦）")
-            col4, col5, col6 = st.columns(3)
-            shares = col4.number_input("股數", min_value=0.0, step=1.0)
-            avg_price = col5.number_input("均價", min_value=0.0, step=0.1)
-            price = col6.number_input("現價", min_value=0.0, step=0.1)
-            if st.form_submit_button("新增", type="primary", icon=":material/add:"):
-                name, symbol, account = name.strip(), symbol.strip(), account.strip()
-                if not (name and symbol and account):
-                    st.warning("名稱、代號、帳戶都要填")
-                elif shares <= 0 or avg_price <= 0 or price <= 0:
-                    st.warning("股數、均價、現價都要大於 0")
-                else:
-                    db.add_holding(name, symbol, account, shares, avg_price, price)
-                    done(f"已新增：{plain(name)}（{plain(account)}）")  # 重跑讓上面的總覽表馬上更新
+        card_title("新增持股", "只要填代號、券商、股數，名稱和現價會自動查")
+        add_holding_form()
 
     if not holdings:
         st.info("還沒有持股")
         return
 
-    # --- 更新現價 ---
+    # --- 手動修改現價：自動抓不到的（例如基金、海外股票）才需要 ---
     with side_col, st.container(key="card_update_price"):
-        card_title("更新現價")
+        card_title("手動修改現價", "自動抓不到的才需要")
+        st.caption("有開自動更新的話，抓得到報價的股票下次更新時會被換成最新價格。")
         with st.form("update_price", border=False):
             symbols = [m["symbol"] for m in analyzed]
             sym = st.selectbox("代號", symbols,
@@ -1058,19 +1289,130 @@ def page_stocks() -> None:
 
     # --- 各帳戶明細（可刪除）---
     with st.container(key="card_holding_list"):
-        card_title("各帳戶明細", "刪除的是單一帳戶裡的那一筆")
+        card_title("各券商明細", "刪除的是單一券商裡的那一筆")
         widths = [3, 2, 3, 1]
-        for col, text in zip(st.columns(widths), ["股票", "帳戶", "股數與均價", ""]):
+        for col, text in zip(st.columns(widths), ["股票", "券商", "股數與均價", ""]):
             col.caption(text)
         for h in holdings:
             col1, col2, col3, col4 = st.columns(widths, vertical_alignment="center")
             col1.write(f"**{plain(h['name'])}**（{plain(h['symbol'])}）")
             col2.write(plain(h["account"]))
-            col3.write(f"{h['shares']:,.0f} 股 @ {h['avg_price']:,.2f}")
+            avg = f"@ {h['avg_price']:,.2f}" if h["avg_price"] > 0 else "・均價未填"
+            col3.write(f"{h['shares']:,.0f} 股 {avg}")
             with col4:
                 if delete_button(f"del_hold_{h['id']}"):
                     db.delete_holding(h["id"])
                     st.rerun()
+
+    with st.container(key="card_brokers"):
+        card_title("券商手續費", "買賣時照這裡的折扣自動算")
+        broker_fee_form()
+
+
+NEW_BROKER = "＋ 新的券商"
+
+
+def broker_options() -> list[str]:
+    """券商下拉選單的選項：已經有的券商，最後一個是「新的券商」（選了再輸入名字）。"""
+    return [b["name"] for b in db.get_brokers()] + [NEW_BROKER]
+
+
+def add_holding_form() -> None:
+    """新增持股：代號、券商、股數、均價（選填）。名稱和現價用 quotes.lookup 查。
+
+    規則（不同意可以改）：
+    - 名稱：自己有填就用自己填的，沒填才用查到的
+    - 現價：查得到就用查到的；查不到（基金、海外股票、沒網路）才用自己填的
+    - 設定頁關掉「自動更新股價」時完全不連網路，名稱和現價都要自己填
+    """
+    with st.form("add_holding", clear_on_submit=True, border=False):
+        col1, col2, col3 = st.columns(3)
+        symbol = col1.text_input("代號（例如 2330）")
+        broker = col2.selectbox("券商", broker_options())
+        new_broker = col3.text_input("新的券商名稱（選「新的券商」才要填）")
+        col4, col5 = st.columns(2)
+        shares = col4.number_input("股數", min_value=0.0, step=1.0, format="%.0f")
+        avg_price = col5.number_input("均價（選填，不知道就留 0）", min_value=0.0, step=0.1,
+                                      help="不填的話這檔不算損益，其他功能照常")
+        st.caption("查不到報價時（例如基金、海外股票）才需要填：")
+        col6, col7 = st.columns(2)
+        manual_name = col6.text_input("名稱")
+        manual_price = col7.number_input("現價", min_value=0.0, step=0.1)
+        submitted = st.form_submit_button("新增", type="primary", icon=":material/add:")
+    if not submitted:
+        return
+
+    code = normalize_symbol(symbol)
+    broker = new_broker.strip() if broker == NEW_BROKER else broker
+    if not code:
+        st.warning("請輸入代號")
+        return
+    if not broker:
+        st.warning("請選券商，或輸入新的券商名稱")
+        return
+    if shares <= 0:
+        st.warning("股數要大於 0")
+        return
+    info = None
+    if db.get_settings().get("auto_quotes", 1):
+        with st.spinner(f"查詢 {code} 的名稱和現價…"):
+            info = quotes.lookup(code)
+    name = manual_name.strip() or (info["name"] if info else "")
+    price = info["price"] if info else manual_price
+    if not name or price <= 0:
+        st.warning(f"查不到 {plain(code)} 的報價（可能是基金、海外股票、代號打錯，或網路沒連上），"
+                   "請在下面填名稱和現價。")
+        return
+    db.add_holding(name, code, broker, shares, avg_price, price)
+    done(f"已新增：{plain(name)}（{plain(broker)}）{price:,.2f} 元")  # 重跑讓上面的總覽表馬上更新
+
+
+def broker_fee_form() -> None:
+    """每家券商的手續費折扣和最低手續費，一個表單一起改。"""
+    brokers = db.get_brokers()
+    if not brokers:
+        st.caption("新增持股或買進時填的券商會出現在這裡。")
+        return
+    st.caption("折扣：2.8 折填 0.28、六折填 0.6、不打折填 1。"
+               "手續費 = 成交金額 × 0.1425% × 折扣，不到最低手續費時收最低手續費。")
+    with st.form("brokers", border=False):
+        values = {}
+        for b in brokers:
+            col1, col2, col3 = st.columns([2, 2, 2], vertical_alignment="bottom")
+            col1.write(f"**{plain(b['name'])}**")
+            discount = col2.number_input("折扣", min_value=0.01, max_value=1.0, value=float(b["discount"]),
+                                         step=0.01, format="%.3f", key=f"discount_{b['id']}")
+            min_fee = col3.number_input("最低手續費", min_value=0.0, value=float(b["min_fee"]),
+                                        step=1.0, format="%.0f", key=f"min_fee_{b['id']}")
+            values[b["name"]] = (discount, min_fee)
+        if st.form_submit_button("儲存", type="primary", icon=":material/save:"):
+            for name, (discount, min_fee) in values.items():
+                db.save_broker(name, discount, min_fee)
+            done("已儲存券商手續費")
+
+
+def quote_bar() -> None:
+    """持股頁最上面一行：現價是什麼時候的、立即更新按鈕、抓不到的原因。"""
+    settings = db.get_settings()
+    left, right = st.columns([4, 1], vertical_alignment="center")
+    status = quote_status()
+    if not settings.get("auto_quotes", 1):
+        left.caption("股價自動更新已關閉（可以在設定頁打開），現價是手動輸入的。")
+    elif status:
+        left.caption(f"現價：{status}・每 5 分鐘自動更新，資料來源：證交所、櫃買中心")
+    else:
+        left.caption("現價還沒自動更新過")
+    if right.button("立即更新", icon=":material/refresh:", key="refresh_quotes", width="stretch"):
+        refresh_quotes(force=True)
+        done("股價已更新")
+
+    result = st.session_state.get("quote_result")
+    if result and result.error:
+        when = f"（顯示的是 {status} 的價格）" if status else ""
+        st.warning(f"現在抓不到股價，可能是網路沒有連線{when}。可以稍後按「立即更新」，或手動修改現價。")
+    elif result and result.missing:
+        names = "、".join(result.missing)
+        st.caption(f"查不到報價：{plain(names)}（例如基金、海外股票或代號打錯），這些請手動修改現價。")
 
 
 # ---------- 頁面：下單前檢查 ----------
@@ -1101,7 +1443,7 @@ def page_precheck() -> None:
     # 結論：可以下單用墨藍、先不要下單用橘色（紅綠留給漲跌）
     if ok:
         word, tone = "可以下單", INK
-        body = "<p>五項都誠實打勾了，金額也沒有超過手上現金。</p>"
+        body = "<p>五項都誠實打勾了，金額也沒有超過帳戶存款合計。</p>"
     else:
         word, tone = "先不要下單", WARN
         body = "<ul>" + "".join(f"<li>{html.escape(r)}</li>" for r in reasons) + "</ul>"
@@ -1117,7 +1459,7 @@ def page_precheck() -> None:
             after = cash - amount
             # 現金不夠時，剩下的錢用橘色標出來
             after_text = money(after) if after >= 0 else f'<span style="color:{WARN}">{money(after)}</span>'
-            ledger([("", "手上現金", money(cash)),
+            ledger([("", "帳戶存款合計", money(cash)),
                     ("", "− 這筆要花", money(amount)),
                     ("", "= 買完還剩", after_text)])
 
@@ -1129,7 +1471,7 @@ def page_precheck() -> None:
             st.markdown(f"緊急預備金 {money(fund)} / {money(target)}　{status}",
                         unsafe_allow_html=True)
             losing = [f"{plain(m['name'])}（{plain(m['symbol'])}）"
-                      for m in analyze(db.get_holdings()) if m["profit"] < 0]
+                      for m in analyze(db.get_holdings()) if (m["profit"] or 0) < 0]
             st.markdown("虧損中的個股：" + ("、".join(losing) if losing else "沒有"))
 
 
@@ -1147,7 +1489,11 @@ def page_trades() -> None:
     m3.metric("本月當沖", f"{count_day_trades(trades, today.year, today.month)} 次",
               help="當沖次數越少越好")
 
-    with st.expander("新增交易紀錄", icon=":material/add:", expanded=not trades):
+    with st.container(key="card_trade_exec"):
+        card_title("買進／賣出", "持股、帳戶、手續費一起算好")
+        trade_form()
+
+    with st.expander("手動記一筆（不會動到持股和帳戶）", icon=":material/edit_note:"):
         with st.form("add_trade", clear_on_submit=True, border=False):
             col1, col2, col3 = st.columns(3)
             trade_date = col1.date_input("日期", value=today)
@@ -1167,24 +1513,116 @@ def page_trades() -> None:
         return
 
     with st.container(key="card_trade_list"):
-        card_title("全部紀錄")
-        widths = [2, 2.5, 1.2, 2, 3, 1]
-        for col, text in zip(st.columns(widths), ["日期", "標的", "類型", "損益", "備註", ""]):
+        card_title("全部紀錄", "刪除只刪紀錄，不會把持股和帳戶改回去")
+        widths = [1.6, 2.2, 1, 3.2, 1.6, 2.2, 0.8]
+        for col, text in zip(st.columns(widths), ["日期", "標的", "類型", "明細", "損益", "備註", ""]):
             col.caption(text)
         # 類型標籤的顏色：當沖用橘色提醒自己，其他用墨藍和灰
         type_colors = {"當沖": WARN, "買進": INK, "賣出": MUTED}
         for t in trades:
-            col1, col2, col3, col4, col5, col6 = st.columns(widths, vertical_alignment="center")
+            col1, col2, col3, col4, col5, col6, col7 = st.columns(widths, vertical_alignment="center")
             col1.write(t["date"])
             col2.write(plain(t["symbol"]))
             col3.markdown(chip(t["type"], type_colors.get(t["type"], MUTED)),
                           unsafe_allow_html=True)
-            col4.markdown(colored_money(t["pnl"]))
-            col5.write(plain(t["note"] or ""))
-            with col6:
-                if delete_button(f"del_trade_{t['id']}"):
+            col4.write(plain(trade_detail(t)))
+            # 買進沒有損益，顯示「—」；手動記的舊紀錄照原本填的
+            col5.markdown("—" if t["side"] == "buy" else colored_money(t["pnl"]))
+            col6.write(plain(t["note"] or ""))
+            with col7:
+                if delete_button(f"del_trade_{t['id']}", label=""):
                     db.delete_trade(t["id"])
                     st.rerun()
+
+
+def trade_detail(t: dict) -> str:
+    """交易明細的一行字，例如「1,000 股 @ 60.00・手續費 51・稅 180・A 證券」。手動記的紀錄沒有明細。"""
+    if not t["side"]:
+        return ""
+    text = f"{t['shares']:,.0f} 股 @ {t['price']:,.2f}・手續費 {t['fee']:,.0f}"
+    if t["tax"]:
+        text += f"・稅 {t['tax']:,.0f}"
+    return text + f"・{t['broker']}"
+
+
+# 買賣表單的元件 key：送出成功後刪掉這些 key，表單就回到空白（這個表單沒用 st.form，不會自動清空）
+TRADE_KEYS = ["tr_symbol", "tr_shares", "tr_price", "tr_note", "tr_new_broker", "tr_day_trade"]
+
+
+def trade_form() -> None:
+    """買進／賣出：送出時呼叫 db.execute_trade，持股、帳戶、交易紀錄一起改。
+
+    不用 st.form：表單裡的元件要按送出才會更新，這裡想要一邊填一邊看到手續費、稅和帳戶增減。
+    賣出時從現有的持股裡選（哪一家券商的哪一檔），不用再打代號，也不會賣到沒有的股票。
+    """
+    side = st.radio("買或賣", ["買進", "賣出"], horizontal=True, key="tr_side", label_visibility="collapsed")
+    buy = side == "買進"
+    holding = None
+    if buy:
+        col1, col2, col3 = st.columns(3)
+        symbol = normalize_symbol(col1.text_input("代號（例如 2330）", key="tr_symbol"))
+        broker = col2.selectbox("券商", broker_options(), key="tr_broker")
+        if broker == NEW_BROKER:
+            broker = col3.text_input("新的券商名稱", key="tr_new_broker").strip()
+    else:
+        holdings = db.get_holdings()
+        if not holdings:
+            st.caption("還沒有持股可以賣。")
+            return
+        by_id = {h["id"]: h for h in holdings}
+        hid = st.selectbox("賣哪一筆", list(by_id), key="tr_holding",
+                           format_func=lambda i: f"{by_id[i]['symbol']} {by_id[i]['name']}・"
+                                                 f"{by_id[i]['account']}（{by_id[i]['shares']:,.0f} 股）")
+        holding = by_id[hid]
+        symbol, broker = normalize_symbol(holding["symbol"]), holding["account"]
+
+    col4, col5, col6 = st.columns(3)
+    shares = col4.number_input("股數", min_value=0, step=1000, key="tr_shares",
+                               help="一張 = 1000 股；零股直接打股數")
+    price = col5.number_input("成交價", min_value=0.0, step=0.05, format="%.2f", key="tr_price")
+    with col6:
+        account_id = account_select("從哪個帳戶付" if buy else "錢進哪個帳戶", key="tr_account")
+    col7, col8 = st.columns([1, 2])
+    when = col7.date_input("日期", value=date.today(), key="tr_date")
+    note = col8.text_input("備註（例如 為什麼買、為什麼賣）", key="tr_note")
+    day_trade = False if buy else st.checkbox("這是當沖（交易稅減半為 0.15%）", key="tr_day_trade")
+
+    if not (symbol and broker and shares > 0 and price > 0):
+        st.caption("填好代號、券商、股數、成交價，這裡會先算出手續費和帳戶增減。")
+        return
+
+    p = db.trade_preview("buy" if buy else "sell", symbol, broker, shares, price, day_trade)
+    rows = [("", "成交金額", money(p["amount"])), ("", "手續費", money(p["fee"]))]
+    if not buy:
+        rows.append(("", "交易稅", money(p["tax"])))
+    rows.append(("", "= 帳戶要付" if buy else "= 帳戶拿回", money(abs(p["cash"]))))
+    ledger(rows)
+    balance = next(a["balance"] for a in db.get_accounts() if a["id"] == account_id)
+    if buy and -p["cash"] > balance:
+        st.warning(f"「{account_names()[account_id]}」只有 {money(balance)}，不夠付這筆。")
+    if not buy:
+        pnl = realized_pnl(p["cash"], holding["avg_price"], shares)
+        st.markdown("這筆的實現損益：" + (colored_money(pnl) if pnl is not None else "沒填均價，算不出來"))
+
+    if st.button("確認買進" if buy else "確認賣出", type="primary", icon=":material/check:", key="tr_submit"):
+        name = None
+        # 第一次買的股票先查名稱（設定頁關掉自動更新時不連網路，名稱先用代號，之後可以在持股頁看）
+        if buy and not any(normalize_symbol(h["symbol"]) == symbol for h in db.get_holdings()):
+            if db.get_settings().get("auto_quotes", 1):
+                info = quotes.lookup(symbol)
+                name = info["name"] if info else None
+        else:
+            name = next((h["name"] for h in db.get_holdings() if normalize_symbol(h["symbol"]) == symbol), None)
+        try:
+            db.execute_trade("buy" if buy else "sell", symbol, broker, shares, price, account_id,
+                             when.isoformat(), day_trade, name=name, note=note.strip())
+        except ValueError as e:
+            st.warning(str(e))
+            return
+        for key in TRADE_KEYS:
+            st.session_state.pop(key, None)
+        done(f"已{side} {plain(symbol)} {shares:,.0f} 股，「{plain(account_names()[account_id])}」"
+             f"{'扣' if buy else '加'} {money(abs(p['cash']))}")
 
 
 # ---------- 頁面：定期定額試算 ----------
@@ -1245,7 +1683,7 @@ def page_dca() -> None:
 # ---------- 頁面：設定 ----------
 
 def page_settings() -> None:
-    page_header("設定", "收入、現金和緊急預備金，其他頁面的計算都會用到")
+    page_header("設定", "收入和緊急預備金，其他頁面的計算都會用到；現金和銀行存款在「帳戶」頁")
     s = db.get_settings()
 
     form_col, side_col = st.columns([3, 2])
@@ -1256,8 +1694,9 @@ def page_settings() -> None:
             col1, col2 = st.columns(2)
             income = col1.number_input("每月收入", min_value=0.0, step=1000.0, format="%.0f",
                                        value=float(s["monthly_income"]))
-            cash = col2.number_input("手上現金", min_value=0.0, step=100.0, format="%.0f",
-                                     value=float(s["cash_on_hand"]))
+            # 手上現金改在「帳戶」頁管理（每個帳戶各自的餘額），這裡不再填
+            col2.markdown(f'<div class="big-label">帳戶存款合計</div>'
+                          f'<div class="big-num">{money(s["cash_on_hand"])}</div>', unsafe_allow_html=True)
             fund = col1.number_input("緊急預備金（目前存了多少）", min_value=0.0, step=100.0, format="%.0f",
                                      value=float(s["emergency_fund"]))
             target = col2.number_input("預備金目標", min_value=0.0, step=1000.0, format="%.0f",
@@ -1265,7 +1704,6 @@ def page_settings() -> None:
             if st.form_submit_button("儲存", type="primary", icon=":material/save:"):
                 db.save_settings({
                     "monthly_income": income,
-                    "cash_on_hand": cash,
                     "emergency_fund": fund,
                     "emergency_target": target,
                 })
@@ -1278,6 +1716,18 @@ def page_settings() -> None:
                 card_title("緊急預備金進度")
                 note = "已存滿" if fund >= target else f"還差 {money(target - fund)}・已存 {fund / target:.0%}"
                 progress_bar("預備金", fund, target, INK, note)
+
+        # --- 股價自動更新 ---
+        with st.container(key="card_quotes"):
+            card_title("股價自動更新")
+            on = st.toggle("打開總覽、持股頁時自動更新現價", value=bool(s.get("auto_quotes", 1)))
+            st.caption("會連到證交所查詢報價，只送出股票代號（例如 2330），不會送出股數、金額或其他資料。"
+                       "關掉的話不會查股價，現價要自己輸入。")
+            st.caption(f"版本 v{APP_VERSION}・每次打開時會到 Onei Hub 伺服器確認是不是最新版"
+                       "（只下載公開的軟體清單，不送出任何資料）。")
+            if on != bool(s.get("auto_quotes", 1)):
+                db.save_settings({"auto_quotes": 1.0 if on else 0.0})
+                done("已打開股價自動更新" if on else "已關閉股價自動更新")
 
         # --- 匯出備份 ---
         with st.container(key="card_backup"):
@@ -1346,16 +1796,12 @@ def quick_add() -> None:
     記帳是每天最常做的事，步驟越少越容易持續。
     """
     with st.sidebar.popover("記一筆", icon=":material/add:", width="stretch", type="primary"):
-        with st.form("quick_add", clear_on_submit=True, border=False):
-            amount = st.number_input("金額", min_value=0.0, step=10.0, format="%.0f")
-            category = st.radio("類別", CATEGORIES, horizontal=True)
-            note = st.text_input("備註（可不填）")
-            if st.form_submit_button("記下來", type="primary", icon=":material/check:", width="stretch"):
-                if amount <= 0:
-                    st.warning("金額要大於 0")
-                else:
-                    db.add_expense(amount, category, date.today().isoformat(), note)
-                    done(f"已記下：{category} {money(amount)}")
+        # 和記帳頁同一個表單（record_form），日期固定今天；要補記以前的到記帳頁
+        tab_out, tab_in = st.tabs(["支出", "收入"])
+        with tab_out:
+            record_form("quick_expense", "expense", with_date=False)
+        with tab_in:
+            record_form("quick_income", "income", with_date=False)
 
 
 def sidebar_summary() -> None:
@@ -1386,6 +1832,7 @@ NAV = [
     ("日常", [
         (page_overview, "總覽", ":material/space_dashboard:", "overview"),
         (page_expenses, "記帳", ":material/edit_note:", "expenses"),
+        (page_accounts, "帳戶", ":material/account_balance:", "accounts"),
         (page_budgets, "每月預算", ":material/pie_chart:", "budgets"),
         (page_fixed, "固定支出", ":material/event_repeat:", "fixed"),
         (page_debts, "負債", ":material/credit_card:", "debts"),
@@ -1403,6 +1850,42 @@ NAV = [
 
 inject_css()
 
+
+def update_gate() -> None:
+    """版本太舊時擋住整個程式，只顯示「需要更新」（見 update_check.py）。
+
+    每個視窗只問伺服器一次（結果存在 session_state），之後換頁不會再連線。
+    沒網路、問不到時 check() 回傳 None，直接放行。
+    放在畫導覽和側邊欄之前，擋住時 st.stop() 讓後面所有東西都不畫，任何一頁都進不去。
+    """
+    if "update_status" not in st.session_state:
+        st.session_state["update_status"] = update_check.check()
+    status = st.session_state["update_status"]
+    if not status or not status["required"]:
+        return
+
+    latest = status["latest"] or status["min"]
+    st.markdown(
+        '<div class="hero" style="margin-top:2rem"><div><div class="hero-label">OniPulsar 星脈流轉</div>'
+        '<div class="hero-num" style="font-size:2.6rem">需要更新</div>'
+        f'<div class="hero-note">目前版本 v{html.escape(APP_VERSION)} 已停止使用</div></div>'
+        f'<div class="welcome-why">請用 Onei Hub 更新到 v{html.escape(latest)} 才能繼續使用。'
+        '你的資料存在 C:\\Users\\你的名字\\FinanceApp，更新不會影響。</div></div>',
+        unsafe_allow_html=True,
+    )
+    col1, col2, _ = st.columns([1, 1, 2])
+    if col1.button("用 Onei Hub 更新", type="primary", icon=":material/system_update:", width="stretch"):
+        if update_check.open_hub():
+            st.toast("已經打開 Onei Hub，請在「OniPulsar 星脈流轉」頁按「需要更新」", icon=":material/check_circle:")
+        else:
+            st.warning("找不到 Onei Hub，請先按右邊的「下載 Onei Hub」安裝。")
+    if col2.button("下載 Onei Hub", icon=":material/download:", width="stretch"):
+        update_check.open_download_page()
+    st.stop()
+
+
+update_gate()
+
 # st.navigation 負責「現在在哪一頁」，position="hidden" 表示側邊欄由我們自己畫
 pages = {}
 PAGES = {}  # 網址名稱 → 頁面，給頁面裡的 st.page_link 用（例如歡迎畫面的「前往設定」）
@@ -1417,8 +1900,9 @@ for group, items in NAV:
 current = st.navigation(pages, position="hidden")
 
 with st.sidebar:
-    st.markdown('<div class="brand">個人理財</div>'
-                '<div class="brand-sub">本機執行・資料只存在你的電腦</div>',
+    # 名稱：OniPulsar 星脈流轉（2026-10-22 使用者取的新名字，原名「個人理財」）
+    st.markdown('<div class="brand">OniPulsar</div>'
+                '<div class="brand-sub">星脈流轉・資料只存在你的電腦</div>',
                 unsafe_allow_html=True)
     for group, group_pages in pages.items():
         st.markdown(f'<div class="nav-group">{group}</div>', unsafe_allow_html=True)
@@ -1427,6 +1911,12 @@ with st.sidebar:
     st.markdown('<div style="height:.8rem"></div>', unsafe_allow_html=True)
 quick_add()
 sidebar_summary()
+
+# 用的不是平常那個資料庫時，每一頁最上面都提醒（見 db.is_unusual_db）：
+# 這裡記的資料不會出現在平常打開的程式裡，不提醒的話使用者會以為資料不見了
+if db.is_unusual_db():
+    st.warning(f"目前使用的資料庫是 {short_path(db.DB_PATH)}，不是平常那一個。"
+               "在這裡記的資料，平常打開程式時看不到。", icon=":material/database:")
 
 # 上一次存檔留下的通知（見 done()），顯示一次就拿掉
 if "toast" in st.session_state:
