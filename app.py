@@ -38,12 +38,14 @@ from models.budget import (
     remaining_this_month,
     spent_by_category,
 )
+from models.cards import bill_status, due_date, month_total, unpaid, unpaid_total
 from models.cashflow import monthly_savings, total_debt_payment
-from models.debt import months_left, paid_in_month, payment_this_period, payoff_month
+from models.debt import add_months, months_left, paid_in_month, payment_this_period, payoff_month
 from models.dca import monthly_withdrawal, project
 from models.precheck import CHECK_ITEMS, check_order
 from models.fees import realized_pnl
 from models.quotes import is_trading_time, normalize_symbol
+from models.receivables import collected_ratio, outstanding_total
 from version import APP_VERSION
 from models.stocks import CONCENTRATION_LIMIT, analyze, over_concentrated, profit_totals
 from models.trades import TRADE_TYPES, count_day_trades, total_pnl
@@ -82,6 +84,7 @@ LOSS = "#147A53"
 WARN = "#A04E17"
 MUTED = "#5F6672"    # 次要文字：灰（對存摺紙底色約 5:1）
 CHART_COLORS = ["#2B4C7E", "#C9973F", "#6C8EBF", "#8A6FB0", "#4F9A94", "#B7B1A5"]
+CARD_COLOR = "#7A8C99"  # 每月現金流裡「信用卡費」那一段：灰藍（紅綠留給漲跌；只用在圖表，不當文字）
 
 # 每個記帳類別一個顏色，和「預算分配」圓餅圖用同一組，看圖就知道哪一塊是哪個類別。
 # 刻意不用墨藍和金色：這兩個顏色在預算進度條上代表「正常」和「快用完」，避免同一個顏色有兩種意思；
@@ -422,18 +425,19 @@ def account_names() -> dict[int, str]:
 
 
 def account_select(label: str, key: str | None = None, allow_none: bool = False,
-                   default: int | None = None) -> int | None:
+                   default: int | None = None, none_label: str = "不屬於任何帳戶") -> int | None:
     """選帳戶的下拉選單，旁邊顯示目前餘額。回傳帳戶 id。
 
     選項用 id（數字）而不是整個帳戶資料：餘額變了選項也不會變，選到的帳戶不會被重設。
-    allow_none=True 時多一個「不屬於任何帳戶」（舊的記帳沒有帳戶，修改時要能保持原狀）。
+    allow_none=True 時多一個「不屬於任何帳戶」（舊的記帳沒有帳戶，修改時要能保持原狀），
+    這個選項的文字可以用 none_label 換掉。
     """
     accounts = {a["id"]: a for a in db.get_accounts()}
     ids = list(accounts) + ([None] if allow_none else [])
     index = ids.index(default) if default in ids else 0
     return st.selectbox(
         label, ids, index=index, key=key,
-        format_func=lambda i: "不屬於任何帳戶" if i is None
+        format_func=lambda i: none_label if i is None
         else f"{accounts[i]['name']}（{money(accounts[i]['balance'])}）",
     )
 
@@ -637,6 +641,11 @@ def page_overview() -> None:
     total_profit = profit_totals(analyzed)[0]  # 沒填均價的個股不算進損益
     debts = db.get_debts()
     total_debt = sum(d["remaining"] for d in debts)
+    # 別人欠我的錢遲早會回來，算資產；還沒繳的卡費是已經花掉的錢，算負債
+    receivable = outstanding_total(db.get_receivables())
+    card_bills = db.get_card_bills()
+    card_unpaid = unpaid_total(card_bills)
+    networth = cash + total_value + receivable - total_debt - card_unpaid
 
     # --- 結餘：整個 app 的主角。左邊一個大數字，右邊是它怎麼算出來的 ---
     stock_label = "+ 股票市值"
@@ -644,18 +653,22 @@ def page_overview() -> None:
         stock_label += f'<span class="sub">損益 {colored_money_html(total_profit)}</span>'
     if analyzed and quote_status():
         stock_label += f'<span class="sub" style="color:{MUTED}">{quote_status()}</span>'
-    hero_rows = ledger_html([("", "帳戶存款", money(cash)),
-                             ("", stock_label, money(total_value)),
-                             ("", "− 負債餘額", money(total_debt))], total=False)
+    rows = [("", "帳戶存款", money(cash)), ("", stock_label, money(total_value))]
+    # 沒用到的項目不顯示，免得多一排 0 元
+    if receivable:
+        rows.append(("", "+ 別人欠我", money(receivable)))
+    rows.append(("", "− 負債餘額", money(total_debt)))
+    if card_unpaid:
+        rows.append(("", "− 未繳卡費", money(card_unpaid)))
+    hero_rows = ledger_html(rows, total=False)
     st.markdown(
         f'<div class="hero"><div><div class="hero-label">淨資產</div>'
-        f'<div class="hero-num">{cash + total_value - total_debt:,.0f}<small>元</small></div>'
+        f'<div class="hero-num">{networth:,.0f}<small>元</small></div>'
         f'<div class="hero-note">{today.year} 年 {today.month} 月 {today.day} 日的結餘</div></div>'
         f'{hero_rows}</div>',
         unsafe_allow_html=True,
     )
     # 每次打開總覽就記下今天的淨資產（同一天會覆蓋），累積起來就是下面的「淨資產變化」
-    networth = cash + total_value - total_debt
     db.record_networth(today.isoformat(), networth)
 
     # --- 提醒：持股集中度、本月當沖 ---
@@ -668,6 +681,7 @@ def page_overview() -> None:
         alerts.append(("當沖", f"本月已經當沖 {day_trades} 次，請停下來檢討。", WARN))
     else:
         alerts.append(("當沖", "本月 0 次，繼續保持。", INK))
+    alerts += card_bill_alerts(card_bills, today)
     notices(alerts)
 
     # --- 每月現金流 + 持股占比 ---
@@ -675,23 +689,24 @@ def page_overview() -> None:
     fixed_total = sum(item["amount"] for item in db.get_fixed_expenses())
     debt_payment = total_debt_payment(debts)
     living = sum(db.get_budgets().values())
-    savings = monthly_savings(income, fixed_total, debt_payment, living)
+    card_month = month_total(card_bills, today.isoformat()[:7])  # 這個月的卡費（還沒填帳單就是 0）
+    savings = monthly_savings(income, fixed_total, debt_payment, living, card_month)
 
     left, right = st.columns([3, 2])
     with left, st.container(key="card_cashflow"):
         card_title("每月現金流", "收入都花到哪裡去")
-        # 一條橫的長條，把收入切成四段；入不敷出時沒有「可存」那一段
+        # 一條橫的長條，把收入切成五段；入不敷出時沒有「可存」那一段
         parts = pd.DataFrame({
-            "項目": ["固定支出", "負債還款", "生活預算", "每月可存"],
-            "金額": [fixed_total, debt_payment, living, max(savings, 0)],
-            "順序": [1, 2, 3, 4],
+            "項目": ["固定支出", "負債還款", "信用卡費", "生活預算", "每月可存"],
+            "金額": [fixed_total, debt_payment, card_month, living, max(savings, 0)],
+            "順序": [1, 2, 3, 4, 5],
         })
         bar = alt.Chart(parts).mark_bar(height=26, cornerRadius=4).encode(
             # 長條的總長度固定是「收入」，四段加起來剛好填滿
             x=alt.X("金額:Q", stack="zero", axis=None,
                     scale=alt.Scale(domain=[0, max(income, parts["金額"].sum(), 1)], nice=False)),
             color=alt.Color("項目:N", sort=list(parts["項目"]), legend=None,
-                            scale=alt.Scale(range=["#6C8EBF", "#8A6FB0", "#B7B1A5", GOLD])),
+                            scale=alt.Scale(range=["#6C8EBF", "#8A6FB0", CARD_COLOR, "#B7B1A5", GOLD])),
             order="順序:Q",
             tooltip=["項目:N", alt.Tooltip("金額:Q", format=",.0f")],
         ).properties(height=44)
@@ -700,6 +715,7 @@ def page_overview() -> None:
             ("", "收入", money(income)),
             ("#6C8EBF", "− 固定支出", money(fixed_total)),
             ("#8A6FB0", "− 負債還款", money(debt_payment)),
+            (CARD_COLOR, f"− 信用卡費<span class=\"sub\">{today.month} 月帳單</span>", money(card_month)),
             ("#B7B1A5", "− 生活預算", money(living)),
             (GOLD, "= 每月可存", money(savings)),
         ])
@@ -1195,6 +1211,250 @@ def pay_debt(debt_id: int, amount: float, account_id: int) -> None:
         st.warning(str(e))
     else:  # 沒有出錯才會走到這裡（try 的 else）
         done(f"已還 {money(paid)}，「{plain(account_names()[account_id])}」也扣掉了")
+
+
+# ---------- 頁面：別人欠我 ----------
+
+def page_receivables() -> None:
+    """別人欠我的錢：借給朋友、幫人代墊。收回一筆時存進選的帳戶，總覽的淨資產會把還沒收回的加進去。"""
+    page_header("別人欠我", "借出去、幫人代墊的錢；收回一筆就記一筆，看還差多少")
+
+    items = db.get_receivables()
+    m1, m2, m3 = summary_strip("receivables", 3)
+    m1.metric("還沒收回", money(outstanding_total(items)), help="總覽的淨資產會加上這個數字")
+    m2.metric("已經收回", money(sum(i["amount"] - i["remaining"] for i in items)))
+    m3.metric("還沒收完", f"{sum(1 for i in items if i['remaining'] > 0)} 筆")
+
+    list_col, form_col = st.columns([3, 2])
+
+    with form_col, st.container(key="card_add_receivable"):
+        card_title("記一筆別人欠我的")
+        with st.form("add_receivable", clear_on_submit=True, border=False):
+            name = st.text_input("誰、什麼事（例如 小明 借去繳房租、幫同事代墊午餐）")
+            amount = st.number_input("金額", min_value=0.0, step=100.0, format="%.0f")
+            when = st.date_input("借出日期", value=date.today())
+            # 預設「不動帳戶」：第一次用通常是補記以前借的，那時候帳戶早就扣過了，再扣一次會算錯
+            account_id = account_select("錢從哪個帳戶借出", allow_none=True, default=None,
+                                        none_label="以前借的，不動帳戶餘額")
+            note = st.text_input("備註（可不填）")
+            if st.form_submit_button("記下來", type="primary", icon=":material/add:"):
+                name = name.strip()
+                if not name:
+                    st.warning("請輸入是誰、什麼事")
+                elif amount <= 0:
+                    st.warning("金額要大於 0")
+                else:
+                    try:
+                        db.add_receivable(name, amount, when.isoformat(), note.strip(), account_id)
+                    except ValueError as e:  # 帳戶餘額不夠
+                        st.warning(str(e))
+                    else:
+                        done(f"已記下：{plain(name)} 欠 {money(amount)}")
+
+    with list_col:
+        if not items:
+            st.info("目前沒有人欠你錢")
+            return
+        # 所有「收回」都存進這個帳戶（跟負債頁的還款帳戶一樣，放在最上面一個就好）
+        account_id = account_select("收回的錢存進哪個帳戶", key="receivable_account")
+        names = account_names()
+        for r in items:
+            with st.container(key=f"card_receivable_{r['id']}"):
+                receivable_card(r, account_id, names)
+
+
+def receivable_card(r: dict, account_id: int, names: dict[int, str]) -> None:
+    """一筆別人欠我的錢：收回進度、「收回」按鈕、收款紀錄。"""
+    payments = db.get_receivable_payments(r["id"])
+    collected = r["amount"] - r["remaining"]
+    status = chip("已收完", GOLD_TEXT) if r["remaining"] <= 0 else chip(f"{r['date'].replace('-', '/')} 借出", INK)
+    st.markdown(f'<div class="card-title">{html.escape(r["name"])}　{status}</div>', unsafe_allow_html=True)
+    if r["note"]:
+        st.caption(plain(r["note"]))
+    progress_bar("收回進度", collected, r["amount"], INK,
+                 f"還差 {money(r['remaining'])}・已收回 {collected_ratio(r['amount'], r['remaining']):.0%}",
+                 collected_ratio(r["amount"], r["remaining"]))
+
+    b1, b2 = st.columns([3, 1])
+    if r["remaining"] > 0:
+        with b1, st.popover("收回一筆", icon=":material/savings:"):
+            with st.form(f"collect_{r['id']}", border=False):
+                # 預設就是全部收回，部分還款再自己改
+                amount = st.number_input("這次收回多少", min_value=0.0, max_value=float(r["remaining"]),
+                                         value=float(r["remaining"]), step=100.0, format="%.0f")
+                if st.form_submit_button("收回", type="primary", icon=":material/check:"):
+                    try:
+                        got = db.collect_receivable(r["id"], amount, account_id)
+                    except ValueError as e:
+                        st.warning(str(e))
+                    else:
+                        done(f"已收回 {money(got)}，存進「{plain(names[account_id])}」")
+    with b2:
+        if delete_button(f"del_receivable_{r['id']}"):
+            db.delete_receivable(r["id"])
+            st.rerun()
+    if payments:
+        with st.expander(f"收款紀錄（{len(payments)} 筆，共 {money(collected)}）"):
+            rows = [("", f'{p["date"]}<span class="sub">{html.escape(names.get(p["account_id"], ""))}</span>',
+                     money(p["amount"])) for p in payments[:24]]
+            st.markdown(ledger_html(rows, total=False), unsafe_allow_html=True)
+
+
+# ---------- 頁面：信用卡 ----------
+
+# 帳單狀態 → (文字, 顏色)。過期用橘色、快到期用金色（紅綠留給漲跌）
+BILL_STATUS = {
+    "paid": ("已繳清", GOLD_TEXT),
+    "overdue": ("過了繳款日", WARN),
+    "due_soon": ("快到繳款日", GOLD_TEXT),
+    "upcoming": ("還沒繳", INK),
+}
+
+
+def month_label(month: str) -> str:
+    """'2026-11' → '2026 年 11 月'。"""
+    return f"{month[:4]} 年 {int(month[5:])} 月"
+
+
+def card_bill_alerts(bills: list[dict], today: date) -> list[tuple[str, str, str]]:
+    """過了繳款日、或快到繳款日還沒繳清的帳單，給 notices() 用（總覽頁和信用卡頁共用）。"""
+    alerts = []
+    for b in bills:
+        due = due_date(b["month"], b["due_day"])
+        status = bill_status(b["amount"], b["paid"], due, today)
+        if status in ("overdue", "due_soon"):
+            text, color = BILL_STATUS[status]
+            alerts.append(("卡費", f"{html.escape(b['card_name'])} {month_label(b['month'])}帳單還有 "
+                                   f"{money(unpaid(b['amount'], b['paid']))} 沒繳，{due.month}/{due.day} 截止（{text}）。",
+                           color))
+    return alerts
+
+
+def page_cards() -> None:
+    """信用卡費：每張卡每月填一次帳單金額，繳的時候從帳戶扣。
+
+    刻意不放進記帳和固定支出：刷卡的花費如果已經記過帳，繳卡費再記成支出就重複算了；
+    卡費每個月也不一樣，不是固定支出。
+    """
+    today = date.today()
+    this_month = today.isoformat()[:7]
+    page_header("信用卡", "每張卡每月填一次帳單金額，繳費時從帳戶扣；快到繳款日會提醒")
+
+    cards = db.get_cards()
+    bills = db.get_card_bills()
+    m1, m2, m3 = summary_strip("cards", 3)
+    m1.metric("還沒繳的卡費", money(unpaid_total(bills)), help="總覽的淨資產會減掉這個數字")
+    m2.metric(f"{today.month} 月帳單合計", money(month_total(bills, this_month)),
+              help="每月現金流會扣掉這個數字")
+    m3.metric("信用卡", f"{len(cards)} 張")
+    alerts = card_bill_alerts(bills, today)
+    if alerts:
+        notices(alerts)
+
+    list_col, form_col = st.columns([3, 2])
+
+    with form_col:
+        if cards:
+            with st.container(key="card_set_bill"):
+                card_title("填帳單金額", "同一個月再填一次就是修改")
+                # 選項是上個月、這個月、下個月（收到帳單通常是在繳款月的前一個月）
+                months = []
+                for n in (1, 0, -1):
+                    y, m = add_months(today, n)
+                    months.append(f"{y:04d}-{m:02d}")
+                card_names = {c["id"]: c["name"] for c in cards}
+                with st.form("set_bill", clear_on_submit=True, border=False):
+                    card_id = st.selectbox("哪張卡", list(card_names), format_func=lambda i: card_names[i])
+                    month = st.selectbox("哪個月要繳", months, index=1, format_func=month_label)
+                    amount = st.number_input("帳單金額", min_value=0.0, step=100.0, format="%.0f")
+                    if st.form_submit_button("儲存", type="primary", icon=":material/save:"):
+                        if amount <= 0:
+                            st.warning("金額要大於 0")
+                        else:
+                            db.set_card_bill(card_id, month, amount)
+                            done(f"已記下：{plain(card_names[card_id])} {month_label(month)} {money(amount)}")
+
+        with st.container(key="card_add_card"):
+            card_title("新增信用卡")
+            with st.form("add_card", clear_on_submit=True, border=False):
+                name = st.text_input("名稱（例如 A 銀行卡）")
+                due_day = st.number_input("每月幾號以前要繳", min_value=1, max_value=31, value=15, step=1)
+                if st.form_submit_button("新增", type="primary", icon=":material/add:"):
+                    name = name.strip()
+                    if not name:
+                        st.warning("請輸入名稱")
+                    else:
+                        db.add_card(name, int(due_day))
+                        done(f"已新增：{plain(name)}")
+
+    with list_col:
+        if not cards:
+            st.info("還沒有信用卡")
+            return
+        account_id = account_select("卡費從哪個帳戶扣", key="card_pay_account")
+        names = account_names()
+        for c in cards:
+            with st.container(key=f"card_cc_{c['id']}"):
+                credit_card(c, [b for b in bills if b["card_id"] == c["id"]], account_id, names, today)
+
+
+def credit_card(c: dict, bills: list[dict], account_id: int, names: dict[int, str], today: date) -> None:
+    """一張信用卡：還沒繳清的帳單各一列（可以繳清或繳一部分），繳清的收在「過去的帳單」。"""
+    due_chip = chip(f"每月 {c['due_day']} 號繳", MUTED)
+    st.markdown(f'<div class="card-title">{html.escape(c["name"])}　{due_chip}</div>', unsafe_allow_html=True)
+    open_bills = [b for b in bills if unpaid(b["amount"], b["paid"]) > 0][::-1]  # 舊的先繳
+    paid_bills = [b for b in bills if unpaid(b["amount"], b["paid"]) <= 0]
+    if not open_bills:
+        st.caption("目前沒有要繳的帳單" if bills else "還沒填過帳單，從右邊「填帳單金額」開始")
+
+    for b in open_bills:
+        due = due_date(b["month"], b["due_day"])
+        text, color = BILL_STATUS[bill_status(b["amount"], b["paid"], due, today)]
+        left = unpaid(b["amount"], b["paid"])
+        col1, col2 = st.columns(2)
+        col1.markdown(big_number(f"{month_label(b['month'])}帳單", money(b["amount"])), unsafe_allow_html=True)
+        col2.markdown(big_number("還要繳", money(left)), unsafe_allow_html=True)
+        st.markdown(chip(f"{due.month}/{due.day} 截止・{text}", color)
+                    + (f'<span class="sub">　已繳 {money(b["paid"])}</span>' if b["paid"] else ""),
+                    unsafe_allow_html=True)
+        b1, b2, b3 = st.columns([2, 2, 1])
+        with b1:
+            if st.button(f"繳清（{money(left)}）", key=f"pay_bill_{b['id']}", type="primary",
+                         icon=":material/check:"):
+                pay_card_bill(b["id"], left, account_id, names)
+        with b2, st.popover("繳一部分", icon=":material/payments:"):
+            with st.form(f"pay_bill_part_{b['id']}", border=False):
+                amount = st.number_input("這次繳多少", min_value=0.0, max_value=float(left),
+                                         step=100.0, format="%.0f")
+                if st.form_submit_button("繳費", type="primary", icon=":material/check:"):
+                    if amount <= 0:
+                        st.warning("金額要大於 0")
+                    else:
+                        pay_card_bill(b["id"], amount, account_id, names)
+        with b3:
+            if delete_button(f"del_bill_{b['id']}", ""):
+                db.delete_card_bill(b["id"])
+                st.rerun()
+
+    if paid_bills:
+        with st.expander(f"過去的帳單（{len(paid_bills)} 張）"):
+            rows = [("", f'{month_label(b["month"])}<span class="sub">{b["paid_date"] or ""}'
+                         f' {html.escape(names.get(b["account_id"], ""))}</span>', money(b["amount"]))
+                    for b in paid_bills[:24]]
+            st.markdown(ledger_html(rows, total=False), unsafe_allow_html=True)
+    if delete_button(f"del_card_{c['id']}", "刪除這張卡"):
+        db.delete_card(c["id"])
+        st.rerun()
+
+
+def pay_card_bill(bill_id: int, amount: float, account_id: int, names: dict[int, str]) -> None:
+    """繳卡費：帳單已繳增加、帳戶扣錢（db 的同一個交易裡）。餘額不夠時提醒，什麼都不扣。"""
+    try:
+        paid = db.pay_card_bill(bill_id, amount, account_id)
+    except ValueError as e:
+        st.warning(str(e))
+    else:
+        done(f"已繳卡費 {money(paid)}，「{plain(names[account_id])}」也扣掉了")
 
 
 # ---------- 頁面：持股 ----------
@@ -1816,6 +2076,7 @@ def sidebar_summary() -> None:
         sum(item["amount"] for item in db.get_fixed_expenses()),
         total_debt_payment(db.get_debts()),
         sum(budgets.values()),
+        month_total(db.get_card_bills(), today.isoformat()[:7]),
     )
     st.sidebar.markdown(f"""
 <div class="side-sum">
@@ -1835,7 +2096,9 @@ NAV = [
         (page_accounts, "帳戶", ":material/account_balance:", "accounts"),
         (page_budgets, "每月預算", ":material/pie_chart:", "budgets"),
         (page_fixed, "固定支出", ":material/event_repeat:", "fixed"),
-        (page_debts, "負債", ":material/credit_card:", "debts"),
+        (page_debts, "負債", ":material/request_quote:", "debts"),
+        (page_receivables, "別人欠我", ":material/handshake:", "receivables"),
+        (page_cards, "信用卡", ":material/credit_card:", "cards"),
     ]),
     ("投資", [
         (page_stocks, "持股", ":material/candlestick_chart:", "stocks"),

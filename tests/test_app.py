@@ -71,13 +71,16 @@ def seeded(temp_db):
     db.add_expense(120, "吃飯", today, "午餐")
     db.add_fixed_expense("電話費", 499)
     db.add_debt("範例學貸", 30000, 3000)
+    db.add_receivable("範例朋友", 2000, today, "")
+    db.set_card_bill(db.add_card("範例卡", 15), today[:7], 3000)
     db.add_holding("台積電", "2330", "A 證券", 10, 900, 1000)
     db.add_trade(today, "2330", "買進", 0, "")
     db.record_networth("2026-01-01", 10000)
     return temp_db
 
 
-PAGES = ["page_expenses", "page_accounts", "page_budgets", "page_fixed", "page_debts", "page_stocks",
+PAGES = ["page_expenses", "page_accounts", "page_budgets", "page_fixed", "page_debts", "page_receivables",
+         "page_cards", "page_stocks",
          "page_precheck", "page_trades", "page_dca", "page_settings"]
 
 
@@ -91,10 +94,10 @@ def test_有資料時_總覽顯示淨資產(seeded):
     at = make_app().run()
     assert not at.exception
     # 打開總覽會先自動更新股價（測試用的假價格 1234）：
-    # 淨資產 = 現金 50000 + 股票 10 股 × 1234 − 負債 30000 = 32340
-    assert any("32,340" in m.value and "淨資產" in m.value for m in at.markdown)
+    # 淨資產 = 現金 50000 + 股票 10 股 × 1234 + 別人欠我 2000 − 負債 30000 − 未繳卡費 3000 = 31340
+    assert any("31,340" in m.value and "淨資產" in m.value for m in at.markdown)
     # 打開總覽會記下今天的淨資產
-    assert db.get_networth_history()[-1] == {"date": date.today().isoformat(), "value": 32340}
+    assert db.get_networth_history()[-1] == {"date": date.today().isoformat(), "value": 31340}
 
 
 @pytest.mark.parametrize("page", PAGES)
@@ -337,3 +340,59 @@ def test_交易頁賣出_帳戶加錢記損益(seeded):
     assert db.get_settings()["cash_on_hand"] == cash_before + 9950
     assert db.get_holdings() == []
     assert db.get_trades()[0]["pnl"] == 950
+
+
+def test_有別人欠我和卡費時_總覽列出來並提醒(seeded):
+    at = make_app().run()
+    assert not at.exception
+    text = " ".join(m.value for m in at.markdown)
+    assert "+ 別人欠我" in text and "− 未繳卡費" in text and "− 信用卡費" in text
+    # 範例卡每月 15 號繳：今天過了 15 號就是「過了繳款日」，10 號以後是「快到繳款日」
+    if date.today().day >= 10:
+        assert "範例卡" in text and "卡費" in text
+
+def test_別人欠我_記一筆再收回(seeded):
+    at = make_app("page_receivables").run()
+    next(t for t in at.text_input if t.label.startswith("誰、什麼事")).set_value("範例同事 代墊午餐")
+    next(n for n in at.number_input if n.label == "金額").set_value(500)
+    next(b for b in at.button if b.label == "記下來" and "receivable" in str(b.form_id)).click()
+    at.run()
+    assert not at.exception
+    r = [r for r in db.get_receivables() if r["name"] == "範例同事 代墊午餐"][0]
+    assert r["remaining"] == 500
+    assert db.get_settings()["cash_on_hand"] == 50000  # 預設「以前借的」，不動帳戶
+
+    at = make_app("page_receivables").run()
+    next(b for b in at.button if b.label == "收回" and b.form_id == f"collect_{r['id']}").click()
+    at.run()
+    assert not at.exception
+    assert [x for x in db.get_receivables() if x["id"] == r["id"]][0]["remaining"] == 0
+    assert db.get_settings()["cash_on_hand"] == 50500
+
+
+def test_信用卡_繳清帳單從帳戶扣(seeded):
+    bill = db.get_card_bills()[0]
+    at = make_app("page_cards").run()
+    assert not at.exception
+    at.button(key=f"pay_bill_{bill['id']}").click().run()
+    assert not at.exception
+    assert db.get_card_bills()[0]["paid"] == 3000
+    assert db.get_settings()["cash_on_hand"] == 47000
+
+
+def test_信用卡_新增卡片和填帳單(seeded):
+    at = make_app("page_cards").run()
+    next(t for t in at.text_input if t.label.startswith("名稱（例如 A 銀行卡")).set_value("範例 B 卡")
+    next(b for b in at.button if b.label == "新增").click()
+    at.run()
+    assert not at.exception
+    card = [c for c in db.get_cards() if c["name"] == "範例 B 卡"][0]
+
+    at = make_app("page_cards").run()
+    next(x for x in at.selectbox if x.label == "哪張卡").set_value(card["id"])
+    next(n for n in at.number_input if n.label == "帳單金額").set_value(1800)
+    next(b for b in at.button if b.label == "儲存").click()
+    at.run()
+    assert not at.exception
+    assert [(b["month"], b["amount"]) for b in db.get_card_bills() if b["card_id"] == card["id"]] \
+        == [(date.today().isoformat()[:7], 1800)]
