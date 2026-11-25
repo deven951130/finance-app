@@ -24,6 +24,7 @@ from datetime import date, datetime
 import altair as alt  # 安裝 streamlit 時會一起裝好，用來畫圖表
 import pandas as pd  # 安裝 streamlit 時會一起裝好，用來顯示表格
 import streamlit as st
+import streamlit.components.v1 as components  # 用來執行一小段 JavaScript（切換頁面時的數字動畫）
 
 import db
 import quotes
@@ -44,6 +45,8 @@ from models.debt import add_months, months_left, paid_in_month, payment_this_per
 from models.dca import monthly_withdrawal, project
 from models.precheck import CHECK_ITEMS, check_order
 from models.fees import realized_pnl
+from models.goals import (goal_done, goal_totals, item_done, monthly_needed, months_until, parse_item_lines,
+                          progress_ratio)
 from models.quotes import is_trading_time, normalize_symbol
 from models.receivables import collected_ratio, outstanding_total
 from version import APP_VERSION
@@ -97,6 +100,65 @@ CATEGORY_COLORS = {
 # 金額用的字型：宋體。思源宋體由 config.toml 的 headingFont 載入；
 # 沒網路時依序改用 Windows 的新細明體、Mac 的宋體
 SERIF = '"Noto Serif TC", PMingLiU, "Songti TC", serif'
+
+# 切換頁面時的金額動畫：頁面上每個「○○○ 元」都從 0 數到目標數字，全部用同一個時間（DURATION）。
+# 為什麼用 JavaScript 放在 iframe 裡：st.markdown 會把 <script> 去掉，只能用 components.html 執行。
+# iframe 和主頁面同源（Streamlit 允許），所以能用 window.parent 找到主頁面上的數字。
+# 只找「整格就是一個金額」的元素（例如 st.metric 的數字、明細列的金額），
+# 句子中間夾著的金額（例如「剩 1,000 元・已用 50%」）不動，免得把整句文字改掉。
+# __PAGE__ 只是讓 iframe 內容每換一頁就不同（見 app.py 底部的 components.html）。
+COUNT_UP_JS = """
+<!-- page: __PAGE__ -->
+<script>
+(function () {
+  var DURATION = 900;   // 毫秒。所有金額都用這個時間，數字才會一起跑完
+  var WATCH = 2500;     // 換頁後只在這段時間內找新出現的金額，之後不再動（避免按按鈕時亂跳）
+  var parentWin = window.parent;
+  if (parentWin.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+  var doc = parentWin.document;
+  // 不用 requestAnimationFrame：iframe 高度是 0，有些瀏覽器會暫停它的畫面更新，數字就會卡在 0。
+  // 改用 setTimeout 每約 16 毫秒（一秒約 60 次）算一次，時間用主頁面的 performance.now()
+  var now = function () { return parentWin.performance.now(); };
+  var raf = function (fn) { setTimeout(function () { fn(now()); }, 16); };
+  var pattern = /^([+\\-\\u2212]?)(\\d{1,3}(?:,\\d{3})+|\\d+) 元$/;
+  var seen = new WeakSet();
+
+  function countUp(el, sign, target) {
+    seen.add(el);
+    var start = null;
+    function frame(ts) {
+      if (start === null) start = ts;
+      var p = Math.min((ts - start) / DURATION, 1);
+      var eased = 1 - Math.pow(1 - p, 3);   // 先快後慢，結束時比較穩
+      el.textContent = sign + Math.round(target * eased).toLocaleString('en-US') + ' 元';
+      if (p < 1) raf(frame);
+    }
+    el.textContent = sign + '0 元';
+    raf(frame);
+  }
+
+
+  function scan() {
+    var all = doc.querySelectorAll('body *');
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i];
+      if (el.children.length || seen.has(el)) continue;   // 只看最裡面、還沒動過的元素
+      var m = pattern.exec(el.textContent.trim());
+      if (!m) continue;
+      var target = parseInt(m[2].replace(/,/g, ''), 10);
+      if (target === 0) continue;                          // 0 元不用動
+      countUp(el, m[1] === '\\u2212' ? '-' : m[1], target);
+    }
+  }
+
+  scan();
+  var observer = new MutationObserver(scan);
+  observer.observe(doc.body, { childList: true, subtree: true });
+  setTimeout(function () { observer.disconnect(); }, WATCH);
+})();
+</script>
+"""
 
 
 def inject_css() -> None:
@@ -236,6 +298,57 @@ section[data-testid="stSidebar"] div[data-testid="stPopover"] button * {{ color:
 /* 表單送出按鈕撐滿一點，比較好按 */
 div[data-testid="stFormSubmitButton"] button {{ min-width: 120px; }}
 
+/* ---------- 動畫 ----------
+   只有幾個動作，每個都對應一個意思，不做「每張卡片依序飛入」這種裝飾：
+   1. 印章：打開程式時蓋一次，像存摺封面上的印
+   2. 進度條：從 0 長到目前的比例，看得出「走到哪裡」
+   3. 結餘、結論：頁面打開時由下浮現
+   4. 明細列、按鈕：滑過、按下只給顏色和微小位移的回饋
+   Streamlit 每次互動都會整頁重跑，但元素位置沒變時 DOM 不會重建，
+   所以入場動畫只在第一次出現時播放，不會每按一下就重播一次。 */
+@keyframes seal-stamp {{
+    0% {{ opacity: 0; transform: scale(1.6) rotate(-10deg); }}
+    60% {{ opacity: 1; transform: scale(.93) rotate(-3deg); }}
+    100% {{ opacity: 1; transform: scale(1) rotate(-3deg); }}
+}}
+@keyframes grow {{ from {{ width: 0; }} }}
+@keyframes rise {{ from {{ opacity: 0; transform: translateY(8px); }} }}
+
+section[data-testid="stSidebar"] .seal {{
+    display: inline-grid; place-items: center; vertical-align: middle;
+    width: 1.8rem; height: 1.8rem; margin-right: .6rem;
+    border: 2px solid #E3B866; border-radius: 4px; color: #E3B866;
+    font-family: {SERIF}; font-size: 1.05rem; font-weight: 900; line-height: 1;
+    animation: seal-stamp .6s cubic-bezier(.3, .7, .3, 1) both;
+}}
+
+.budget-fill {{ transition: width .6s cubic-bezier(.2, .7, .2, 1);
+                animation: grow .9s cubic-bezier(.2, .7, .2, 1) both; }}
+.hero-num, .verdict-word {{ animation: rise .6s ease-out both; }}
+.hero-num {{ animation-delay: .1s; }}
+
+/* 明細列：滑過時整列淡淡變色，並用負邊界把文字位置留在原來的對齊線上 */
+.ledger {{ margin: 0 -.5rem; }}
+.ledger-row {{ padding: 7px .5rem; border-radius: 4px;
+               transition: background-color .2s ease; }}
+.ledger-row:not(.total):hover {{ background: #E6ECE8; }}
+
+/* 按鈕：按下去微縮，像實體按鍵；顏色變化也要慢一點，不要突然跳色 */
+button[kind] {{ transition: transform .15s ease, background-color .2s ease,
+                border-color .2s ease, color .2s ease; }}
+button[kind]:active {{ transform: scale(.97); }}
+
+/* 側邊欄導覽：滑過時底色淡入，目前頁面的底色不動 */
+section[data-testid="stSidebar"] [data-testid="stPageLink-NavLink"] {{
+    transition: background-color .2s ease, padding-left .2s ease;
+}}
+section[data-testid="stSidebar"] [data-testid="stPageLink-NavLink"]:hover {{
+    background-color: rgba(255, 255, 255, .08);
+}}
+
+/* 頁首下面一條細線，像存摺每一頁的抬頭 */
+.page-head {{ border-bottom: 1px solid #CCD6CF; padding-bottom: .9rem; }}
+
 /* ---------- 手機（寬度 640px 以下） ----------
    Streamlit 在窄螢幕會把每個欄位都疊成一行，明細列表就會被拉得很長。
    列表卡片的 key 都以 _list 結尾，這裡讓它們的每一列保持橫排。 */
@@ -269,6 +382,14 @@ div[data-testid="stFormSubmitButton"] button {{ min-width: 120px; }}
     /* 刪除按鈕只留垃圾桶圖示，省空間 */
     [class*="st-key-card"][class*="_list"] button[kind="tertiary"] div[data-testid="stMarkdownContainer"] {{
         display: none;
+    }}
+}}
+
+/* 有些人會因為動態畫面不舒服（前庭敏感），系統設定「減少動態效果」時全部關掉 */
+@media (prefers-reduced-motion: reduce) {{
+    *, *::before, *::after {{
+        animation-duration: .01ms !important; animation-iteration-count: 1 !important;
+        transition-duration: .01ms !important;
     }}
 }}
 </style>
@@ -358,7 +479,7 @@ def plain(text: str) -> str:
     return re.sub(r"([\\`*_{}\[\]()#+\-.!|$~<>])", r"\\\1", text)
 
 
-def done(message: str) -> None:
+def done(message: str, close: str | None = None) -> None:
     """存檔成功後呼叫：記下要顯示的通知，然後立刻重跑整頁。
 
     為什麼一定要重跑：
@@ -367,9 +488,25 @@ def done(message: str) -> None:
       下一次輸入的數字會被當成另一個輸入框而丟掉（連按兩次「儲存」，第二次會沒存到）。
     通知先放進 st.session_state（重跑之間會保留的字典），重跑後由主程式用 st.toast 顯示。
     不用 st.success：它是綠色，而綠色在這個 app 代表「賠錢」。
+    close 是要順便關掉的小視窗的 key（見 closable_popover）。
     """
     st.session_state["toast"] = message
+    if close:
+        st.session_state["close_popover"] = close
     st.rerun()
+
+
+def closable_popover(label: str, key: str, **kwargs):
+    """可以用程式關掉的小視窗（st.popover）：done(訊息, close=key) 之後，重跑時這個小視窗會是關的。
+
+    為什麼不能在 done() 裡直接寫 st.session_state[key] = False：
+    Streamlit 不准在元件「畫出來之後」改它的狀態（會丟例外），所以先記下要關哪一個，
+    重跑時在畫出來「之前」改成關的。on_change="rerun" 加上 key，Streamlit 才會記住開關狀態、讓程式改。
+    """
+    if st.session_state.get("close_popover") == key:
+        del st.session_state["close_popover"]
+        st.session_state[key] = False
+    return st.popover(label, key=key, on_change="rerun", **kwargs)
 
 
 def progress_bar(label: str, value: float, target: float, color: str, note: str,
@@ -770,6 +907,7 @@ def page_overview() -> None:
         else:
             st.info("還沒有持股")
 
+    goals_overview(today, savings if income > 0 else None)
     networth_trend()
 
     # --- 本月預算使用 ---
@@ -782,6 +920,48 @@ def page_overview() -> None:
         for i, c in enumerate(CATEGORIES):
             with cols[i % 2]:
                 budget_bar(c, spent[c], budgets.get(c, 0.0))
+
+
+def goals_overview(today: date, savings: float | None) -> None:
+    """總覽的「儲蓄目標」卡片：還沒達成的目標各一條進度條，再跟每月可存比一比。
+
+    savings 是每月可存；還沒填收入時是 None，就不比（收入 0 元時每個目標都會「存不夠」，沒有意義）。
+    沒有任何目標時整張卡片不顯示，總覽不多一塊空的。
+    """
+    goals = db.get_goals()
+    if not goals:
+        return
+    active = [g for g in goals if not goal_done(g["items"])]
+    finished = len(goals) - len(active)
+    total_need = 0.0
+    rows = []
+    for g in active:
+        totals = goal_totals(g["items"])
+        deadline = date.fromisoformat(g["deadline"]) if g["deadline"] else None
+        need = monthly_needed(totals["remaining"], months_until(today, deadline))
+        total_need += need or 0.0
+        rows.append((g, totals, need, deadline))
+
+    with st.container(key="card_goals_overview"):
+        note = f"每月共要存 {money(total_need)}" if total_need else ""
+        if finished:
+            note += ("・" if note else "") + f"已達成 {finished} 個"
+        card_title("儲蓄目標", note)
+        if not active:
+            st.caption("所有目標都達成了！")
+        for g, totals, need, deadline in rows:
+            label = html.escape(g["name"])
+            if deadline:
+                # .sub 的間距只在明細列裡有效，這裡在進度條標題裡，所以直接寫樣式
+                label += (f'<span style="color:{MUTED};font-weight:400;font-size:.82rem;margin-left:.5rem">'
+                          f'{deadline.year}/{deadline.month}/{deadline.day} 截止</span>')
+            progress_bar(label, totals["target"] - totals["remaining"], totals["target"], INK,
+                         goal_note(totals, False, need), totals["ratio"])
+        # 目標每月要存的，比每月可存還多：照現在的收支存不到，提早知道才能調整預算或延後截止日
+        if savings is not None and total_need > max(savings, 0):
+            notices([("目標", f"儲蓄目標每月共要存 {money(total_need)}，比每月可存 {money(savings)} "
+                              f"多 {money(total_need - max(savings, 0))}。可以減少生活預算，或把截止日往後延。", WARN)])
+        st.page_link(PAGES["goals"], label="前往儲蓄目標", icon=":material/arrow_forward:")
 
 
 def networth_trend() -> None:
@@ -1345,6 +1525,235 @@ def receivable_card(r: dict, account_id: int, names: dict[int, str]) -> None:
             rows = [("", f'{p["date"]}<span class="sub">{html.escape(names.get(p["account_id"], ""))}</span>',
                      money(p["amount"])) for p in payments[:24]]
             st.markdown(ledger_html(rows, total=False), unsafe_allow_html=True)
+
+
+# ---------- 頁面：儲蓄目標 ----------
+
+def page_goals() -> None:
+    """儲蓄目標：像任務清單，每個目標點開後列出細項，各自存、各自看進度。
+
+    存進目標預設只是「把錢記到這個目標名下」，不動帳戶、不影響淨資產（錢還在銀行帳戶裡）。
+    目標指定了「旅費放在哪個帳戶」時，存入可以順便從別的帳戶轉過去（只是帳戶之間搬錢，淨資產也不變）。
+    """
+    page_header("儲蓄目標", "像任務一樣：一個目標拆成幾個細項，存一筆記一筆，各自看進度")
+
+    goals = db.get_goals()
+    # 達成的移到後面，進行中的在前面（sorted 是穩定排序：同一組裡維持建立順序）
+    goals = sorted(goals, key=lambda g: goal_done(g["items"]))
+    earmarked = sum(goal_totals(g["items"])["saved"] for g in goals)
+    cash = db.get_settings()["cash_on_hand"]
+
+    m1, m2, m3 = summary_strip("goals", 3)
+    m1.metric("已存進目標", money(earmarked))
+    m2.metric("還差", money(sum(goal_totals(g["items"])["remaining"] for g in goals)))
+    m3.metric("帳戶裡還沒分配", money(cash - earmarked),
+              help="帳戶合計減掉已存進目標的錢，看還有多少錢沒有指定用途。順便轉帳只是帳戶之間搬錢，合計不變")
+    if earmarked > cash:
+        notices([("注意", f"存進目標的錢（{money(earmarked)}）比帳戶合計（{money(cash)}）還多，"
+                          "可能有錢已經花掉了，記得到目標裡「取出」。", WARN)])
+
+    list_col, form_col = st.columns([3, 2])
+
+    with form_col, st.container(key="card_add_goal"):
+        card_title("新增目標")
+        with st.form("add_goal", clear_on_submit=True, border=False):
+            name = st.text_input("目標名稱（例如 日本旅遊）")
+            deadline = st.date_input("截止日（例如出發日，可不填）", value=None, min_value=date.today())
+            lines = st.text_area("細項：一行一個，名稱 空格 金額",
+                                 placeholder="來回機票 12000\n住宿 15000\n交通 4000\n吃飯購物 20000")
+            # 預設不指定：只是記在目標名下。想把旅費分開放，先到帳戶頁開一個「旅費」帳戶再選它
+            account_id = account_select("旅費放在哪個帳戶（可不選）", key="goal_account", allow_none=True,
+                                        default=None, none_label="不指定，只記在目標名下")
+            note = st.text_input("備註（可不填）")
+            if st.form_submit_button("建立目標", type="primary", icon=":material/add:"):
+                items, bad = parse_item_lines(lines)
+                name = name.strip()
+                if not name:
+                    st.warning("請輸入目標名稱")
+                elif bad:
+                    st.warning("這幾行看不懂，請寫成「名稱 金額」：" + "、".join(plain(b) for b in bad))
+                else:
+                    goal_id = db.add_goal(name, deadline.isoformat() if deadline else None, note.strip(), account_id)
+                    for item_name, target in items:
+                        db.add_goal_item(goal_id, item_name, target)
+                    done(f"已建立目標：{plain(name)}（{len(items)} 個細項）")
+
+    with list_col:
+        if not goals:
+            st.info("還沒有儲蓄目標。在右邊建立一個，例如「日本旅遊」，再列出機票、住宿這些細項。")
+            return
+        names = account_names()
+        for g in goals:
+            goal_card(g, names)
+
+
+def goal_note(totals: dict, finished: bool, need: float | None) -> str:
+    """目標進度條下面的小字（儲蓄目標頁和總覽共用，兩邊說法才一致）。"""
+    if finished:
+        return f'<span style="color:{GOLD_TEXT};font-weight:600">全部細項都存到了</span>'
+    if need is not None:
+        return f"還差 {money(totals['remaining'])}・每月存 {money(need)} 就來得及"
+    return f"還差 {money(totals['remaining'])}"
+
+
+def goal_card(g: dict, names: dict[int, str]) -> None:
+    """一個目標：可以點開的區塊（st.expander）。標題列就看得到整體進度，點開看細項。"""
+    items = g["items"]
+    totals = goal_totals(items)
+    finished = goal_done(items)
+    deadline = date.fromisoformat(g["deadline"]) if g["deadline"] else None
+    label = f"{plain(g['name'])}　{money(totals['saved'])} / {money(totals['target'])}・{totals['ratio']:.0%}"
+    # key 固定用目標的 id：標題裡的金額每存一筆就會變，沒有 key 的話 Streamlit 會當成新的區塊而自動收起來
+    with st.expander(label, key=f"goal_{g['id']}", icon=":material/task_alt:" if finished else ":material/flag:"):
+        # 截止日、每月要存多少
+        months = months_until(date.today(), deadline)
+        need = monthly_needed(totals["remaining"], months)
+        if finished:
+            tags = chip("已達成", GOLD_TEXT)
+        elif deadline and months == 0:
+            tags = chip(f"{deadline:%Y/%m/%d} 已過", WARN)
+        elif deadline:
+            tags = chip(f"{deadline:%Y/%m/%d} 截止・剩 {months} 個月", INK)
+        else:
+            tags = chip("沒有截止日", MUTED)
+        if g["account_id"] in names:
+            tags += " " + chip(f"放在 {names[g['account_id']]}", INK)  # chip() 自己會 html.escape
+        st.markdown(tags, unsafe_allow_html=True)
+        if g["note"]:
+            st.caption(plain(g["note"]))
+
+        progress_bar("整體進度", totals["target"] - totals["remaining"], totals["target"],
+                     GOLD if finished else INK, goal_note(totals, finished, need), totals["ratio"])
+
+        st.markdown('<div class="card-title" style="margin-top:.8rem">細項</div>', unsafe_allow_html=True)
+        if not items:
+            st.caption("還沒有細項，在下面加一個。")
+        for item in items:
+            goal_item_row(item, months, g["account_id"] if g["account_id"] in names else None, names)
+
+        # 加細項：一行排開，名稱、金額、按鈕
+        with st.form(f"add_item_{g['id']}", clear_on_submit=True, border=False):
+            c1, c2, c3 = st.columns([3, 2, 1.4], vertical_alignment="bottom")
+            item_name = c1.text_input("新增細項", placeholder="例如 網卡、保險")
+            target = c2.number_input("目標金額", min_value=0.0, step=1000.0, format="%.0f")
+            if c3.form_submit_button("加上", icon=":material/add:"):
+                if not item_name.strip():
+                    st.warning("請輸入細項名稱")
+                else:
+                    db.add_goal_item(g["id"], item_name.strip(), target)
+                    done(f"已加上細項：{plain(item_name.strip())}")
+
+        with st.popover("修改這個目標", icon=":material/edit:"):
+            with st.form(f"edit_goal_{g['id']}", border=False):
+                new_name = st.text_input("目標名稱", value=g["name"])
+                new_deadline = st.date_input("截止日（可不填）", value=deadline)
+                new_note = st.text_input("備註", value=g["note"] or "")
+                new_account = account_select("旅費放在哪個帳戶", key=f"goal_account_{g['id']}", allow_none=True,
+                                             default=g["account_id"], none_label="不指定，只記在目標名下")
+                st.caption("換帳戶不會搬動已經存的錢，要搬的話到帳戶頁轉帳。")
+                if st.form_submit_button("儲存", type="primary"):
+                    if not new_name.strip():
+                        st.warning("請輸入目標名稱")
+                    else:
+                        db.update_goal(g["id"], new_name.strip(),
+                                       new_deadline.isoformat() if new_deadline else None, new_note.strip(),
+                                       new_account)
+                        done("已修改目標")
+            st.divider()
+            st.caption("刪除會連同所有細項和存入紀錄一起刪掉。帳戶餘額不會變：轉進旅費帳戶的錢還在那個帳戶裡。")
+            if st.button("刪除這個目標", key=f"del_goal_{g['id']}", icon=":material/delete:"):
+                db.delete_goal(g["id"])
+                done(f"已刪除目標：{plain(g['name'])}")
+
+
+def goal_item_row(item: dict, months: int | None, goal_account: int | None, names: dict[int, str]) -> None:
+    """一個細項：進度條，加上「存入／取出」和「紀錄・修改」兩個小視窗（st.popover）。
+
+    一個細項只放兩個按鈕：放五個（存入、取出、修改、刪除、紀錄）在手機上會擠成一團。
+    goal_account 是目標的旅費帳戶（沒指定是 None），有的話存入表單多一個「順便轉帳」。
+    """
+    saved, target = item["saved"], item["target"]
+    left = max(target - saved, 0.0)
+    if item_done(saved, target):
+        color = GOLD
+        note = f'<span style="color:{GOLD_TEXT};font-weight:600">已達成</span>'
+        if saved > target:
+            note += f"・多存了 {money(saved - target)}"
+    else:
+        color = INK
+        need = monthly_needed(left, months)
+        note = f"還差 {money(left)}・{progress_ratio(saved, target):.0%}"
+        if need is not None:
+            note += f"・每月 {money(need)}"
+    progress_bar(html.escape(item["name"]), saved, target, color, note, progress_ratio(saved, target))
+
+    b1, b2 = st.columns(2)
+    deposit_popover = f"deposit_popover_{item['id']}"
+    with b1, closable_popover("存入／取出", deposit_popover, icon=":material/savings:", width="stretch"):
+        with st.form(f"deposit_{item['id']}", border=False):
+            kind = st.radio("要做什麼", ["存入", "取出"], horizontal=True)
+            # 預設金額：存入是「還差多少」，一次存滿；部分存入再自己改
+            amount = st.number_input("金額", min_value=0.0, value=float(left), step=100.0, format="%.0f")
+            when = st.date_input("日期", value=date.today())
+            from_account = None
+            if goal_account is not None:
+                # 表單裡選了「存入／取出」不會馬上重跑，所以說明文字兩個方向都寫
+                others = [i for i in names if i != goal_account]
+                balances = {a["id"]: a["balance"] for a in db.get_accounts()}
+                from_account = st.selectbox(
+                    f"順便轉帳（存入：轉進「{names[goal_account]}」；取出：轉回這個帳戶）",
+                    [None] + others,
+                    format_func=lambda i: "不轉帳，錢已經在旅費帳戶" if i is None
+                    else f"{names[i]}（{money(balances[i])}）",
+                )
+            dep_note = st.text_input("備註（可不填）")
+            if st.form_submit_button("記下來", type="primary", icon=":material/check:"):
+                if amount <= 0:
+                    st.warning("金額要大於 0")
+                else:
+                    try:
+                        got = db.deposit_goal_item(item["id"], amount if kind == "存入" else -amount,
+                                                   when.isoformat(), dep_note.strip(), from_account)
+                    except ValueError as e:  # 餘額不夠、沒存過不能取出
+                        st.warning(str(e))
+                    else:
+                        moved = ""
+                        if from_account is not None:
+                            src, dst = ((from_account, goal_account) if got > 0 else (goal_account, from_account))
+                            moved = f"（{plain(names[src])} → {plain(names[dst])}）"
+                        # 存完就關掉小視窗：不關的話它還開著、金額變成新的「還差多少」，容易以為沒存到又按一次
+                        done(f"{plain(item['name'])}：已{kind} {money(abs(got))}{moved}", close=deposit_popover)
+    with b2, st.popover("紀錄・修改", icon=":material/more_horiz:", width="stretch"):
+        deposits = db.get_goal_deposits(item["id"])
+        if deposits:
+            rows = [("", f'{d["date"]}<span class="sub" style="color:{MUTED}">{deposit_detail(d, names)}</span>',
+                     signed_money(d["amount"])) for d in deposits[:30]]
+            st.markdown(ledger_html(rows, total=False), unsafe_allow_html=True)
+        else:
+            st.caption("還沒有存入紀錄")
+        with st.form(f"edit_item_{item['id']}", border=False):
+            new_name = st.text_input("細項名稱", value=item["name"])
+            new_target = st.number_input("目標金額", min_value=0.0, value=float(target), step=1000.0, format="%.0f")
+            if st.form_submit_button("儲存"):
+                if not new_name.strip():
+                    st.warning("請輸入細項名稱")
+                else:
+                    db.update_goal_item(item["id"], new_name.strip(), new_target)
+                    done("已修改細項")
+        if st.button("刪除這個細項", key=f"del_item_{item['id']}", icon=":material/delete:"):
+            db.delete_goal_item(item["id"])
+            done(f"已刪除細項：{plain(item['name'])}")
+
+
+def deposit_detail(d: dict, names: dict[int, str]) -> str:
+    """存入紀錄旁邊的灰字：有轉帳時寫「從 現金 轉入」「轉回 現金」，再接備註。回傳 HTML（已 escape）。"""
+    parts = []
+    if d["from_account_id"] in names:
+        account = html.escape(names[d["from_account_id"]])
+        parts.append(f"從 {account} 轉入" if d["amount"] > 0 else f"轉回 {account}")
+    if d["note"]:
+        parts.append(html.escape(d["note"]))
+    return "・".join(parts)
 
 
 # ---------- 頁面：信用卡 ----------
@@ -2142,6 +2551,7 @@ NAV = [
         (page_expenses, "記帳", ":material/edit_note:", "expenses"),
         (page_accounts, "帳戶", ":material/account_balance:", "accounts"),
         (page_budgets, "每月預算", ":material/pie_chart:", "budgets"),
+        (page_goals, "儲蓄目標", ":material/flag:", "goals"),
         (page_fixed, "固定支出", ":material/event_repeat:", "fixed"),
         (page_debts, "負債", ":material/request_quote:", "debts"),
         (page_receivables, "別人欠我", ":material/handshake:", "receivables"),
@@ -2211,7 +2621,8 @@ current = st.navigation(pages, position="hidden")
 
 with st.sidebar:
     # 名稱：OniPulsar 星脈流轉（2026-10-22 使用者取的新名字，原名「個人理財」）
-    st.markdown('<div class="brand">OniPulsar</div>'
+    # 左邊的小方框是「印」：存摺封面上蓋的章，打開時會蓋一次（見 inject_css 的動畫區）
+    st.markdown('<div class="brand"><span class="seal">星</span>OniPulsar</div>'
                 '<div class="brand-sub">星脈流轉・資料只存在你的電腦</div>',
                 unsafe_allow_html=True)
     for group, group_pages in pages.items():
@@ -2232,4 +2643,8 @@ if db.is_unusual_db():
 if "toast" in st.session_state:
     st.toast(st.session_state.pop("toast"), icon=":material/check_circle:")
 
+# 切換頁面時，金額從 0 跳到目標數字（見 COUNT_UP_JS）。
+# 這個 iframe 的內容含有頁面名稱，換頁時內容改變、iframe 會重新載入，腳本才會再跑一次；
+# 同一頁裡按按鈕、輸入數字造成的重跑，內容不變，不會重播。
+components.html(COUNT_UP_JS.replace("__PAGE__", html.escape(current.title)), height=0)
 current.run()  # 執行被選中的頁面函式
