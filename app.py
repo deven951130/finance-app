@@ -24,6 +24,7 @@ from datetime import date, datetime
 import altair as alt  # 安裝 streamlit 時會一起裝好，用來畫圖表
 import pandas as pd  # 安裝 streamlit 時會一起裝好，用來顯示表格
 import streamlit as st
+import streamlit.components.v1 as components  # 用來執行一小段 JavaScript（切換頁面時的數字動畫）
 
 import db
 import quotes
@@ -99,6 +100,65 @@ CATEGORY_COLORS = {
 # 金額用的字型：宋體。思源宋體由 config.toml 的 headingFont 載入；
 # 沒網路時依序改用 Windows 的新細明體、Mac 的宋體
 SERIF = '"Noto Serif TC", PMingLiU, "Songti TC", serif'
+
+# 切換頁面時的金額動畫：頁面上每個「○○○ 元」都從 0 數到目標數字，全部用同一個時間（DURATION）。
+# 為什麼用 JavaScript 放在 iframe 裡：st.markdown 會把 <script> 去掉，只能用 components.html 執行。
+# iframe 和主頁面同源（Streamlit 允許），所以能用 window.parent 找到主頁面上的數字。
+# 只找「整格就是一個金額」的元素（例如 st.metric 的數字、明細列的金額），
+# 句子中間夾著的金額（例如「剩 1,000 元・已用 50%」）不動，免得把整句文字改掉。
+# __PAGE__ 只是讓 iframe 內容每換一頁就不同（見 app.py 底部的 components.html）。
+COUNT_UP_JS = """
+<!-- page: __PAGE__ -->
+<script>
+(function () {
+  var DURATION = 900;   // 毫秒。所有金額都用這個時間，數字才會一起跑完
+  var WATCH = 2500;     // 換頁後只在這段時間內找新出現的金額，之後不再動（避免按按鈕時亂跳）
+  var parentWin = window.parent;
+  if (parentWin.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+  var doc = parentWin.document;
+  // 不用 requestAnimationFrame：iframe 高度是 0，有些瀏覽器會暫停它的畫面更新，數字就會卡在 0。
+  // 改用 setTimeout 每約 16 毫秒（一秒約 60 次）算一次，時間用主頁面的 performance.now()
+  var now = function () { return parentWin.performance.now(); };
+  var raf = function (fn) { setTimeout(function () { fn(now()); }, 16); };
+  var pattern = /^([+\\-\\u2212]?)(\\d{1,3}(?:,\\d{3})+|\\d+) 元$/;
+  var seen = new WeakSet();
+
+  function countUp(el, sign, target) {
+    seen.add(el);
+    var start = null;
+    function frame(ts) {
+      if (start === null) start = ts;
+      var p = Math.min((ts - start) / DURATION, 1);
+      var eased = 1 - Math.pow(1 - p, 3);   // 先快後慢，結束時比較穩
+      el.textContent = sign + Math.round(target * eased).toLocaleString('en-US') + ' 元';
+      if (p < 1) raf(frame);
+    }
+    el.textContent = sign + '0 元';
+    raf(frame);
+  }
+
+
+  function scan() {
+    var all = doc.querySelectorAll('body *');
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i];
+      if (el.children.length || seen.has(el)) continue;   // 只看最裡面、還沒動過的元素
+      var m = pattern.exec(el.textContent.trim());
+      if (!m) continue;
+      var target = parseInt(m[2].replace(/,/g, ''), 10);
+      if (target === 0) continue;                          // 0 元不用動
+      countUp(el, m[1] === '\\u2212' ? '-' : m[1], target);
+    }
+  }
+
+  scan();
+  var observer = new MutationObserver(scan);
+  observer.observe(doc.body, { childList: true, subtree: true });
+  setTimeout(function () { observer.disconnect(); }, WATCH);
+})();
+</script>
+"""
 
 
 def inject_css() -> None:
@@ -2583,4 +2643,8 @@ if db.is_unusual_db():
 if "toast" in st.session_state:
     st.toast(st.session_state.pop("toast"), icon=":material/check_circle:")
 
+# 切換頁面時，金額從 0 跳到目標數字（見 COUNT_UP_JS）。
+# 這個 iframe 的內容含有頁面名稱，換頁時內容改變、iframe 會重新載入，腳本才會再跑一次；
+# 同一頁裡按按鈕、輸入數字造成的重跑，內容不變，不會重播。
+components.html(COUNT_UP_JS.replace("__PAGE__", html.escape(current.title)), height=0)
 current.run()  # 執行被選中的頁面函式
