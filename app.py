@@ -419,7 +419,7 @@ def plain(text: str) -> str:
     return re.sub(r"([\\`*_{}\[\]()#+\-.!|$~<>])", r"\\\1", text)
 
 
-def done(message: str) -> None:
+def done(message: str, close: str | None = None) -> None:
     """存檔成功後呼叫：記下要顯示的通知，然後立刻重跑整頁。
 
     為什麼一定要重跑：
@@ -428,9 +428,25 @@ def done(message: str) -> None:
       下一次輸入的數字會被當成另一個輸入框而丟掉（連按兩次「儲存」，第二次會沒存到）。
     通知先放進 st.session_state（重跑之間會保留的字典），重跑後由主程式用 st.toast 顯示。
     不用 st.success：它是綠色，而綠色在這個 app 代表「賠錢」。
+    close 是要順便關掉的小視窗的 key（見 closable_popover）。
     """
     st.session_state["toast"] = message
+    if close:
+        st.session_state["close_popover"] = close
     st.rerun()
+
+
+def closable_popover(label: str, key: str, **kwargs):
+    """可以用程式關掉的小視窗（st.popover）：done(訊息, close=key) 之後，重跑時這個小視窗會是關的。
+
+    為什麼不能在 done() 裡直接寫 st.session_state[key] = False：
+    Streamlit 不准在元件「畫出來之後」改它的狀態（會丟例外），所以先記下要關哪一個，
+    重跑時在畫出來「之前」改成關的。on_change="rerun" 加上 key，Streamlit 才會記住開關狀態、讓程式改。
+    """
+    if st.session_state.get("close_popover") == key:
+        del st.session_state["close_popover"]
+        st.session_state[key] = False
+    return st.popover(label, key=key, on_change="rerun", **kwargs)
 
 
 def progress_bar(label: str, value: float, target: float, color: str, note: str,
@@ -1612,7 +1628,8 @@ def goal_item_row(item: dict, months: int | None, goal_account: int | None, name
     progress_bar(html.escape(item["name"]), saved, target, color, note, progress_ratio(saved, target))
 
     b1, b2 = st.columns(2)
-    with b1, st.popover("存入／取出", icon=":material/savings:", width="stretch"):
+    deposit_popover = f"deposit_popover_{item['id']}"
+    with b1, closable_popover("存入／取出", deposit_popover, icon=":material/savings:", width="stretch"):
         with st.form(f"deposit_{item['id']}", border=False):
             kind = st.radio("要做什麼", ["存入", "取出"], horizontal=True)
             # 預設金額：存入是「還差多少」，一次存滿；部分存入再自己改
@@ -1644,7 +1661,8 @@ def goal_item_row(item: dict, months: int | None, goal_account: int | None, name
                         if from_account is not None:
                             src, dst = ((from_account, goal_account) if got > 0 else (goal_account, from_account))
                             moved = f"（{plain(names[src])} → {plain(names[dst])}）"
-                        done(f"{plain(item['name'])}：已{kind} {money(abs(got))}{moved}")
+                        # 存完就關掉小視窗：不關的話它還開著、金額變成新的「還差多少」，容易以為沒存到又按一次
+                        done(f"{plain(item['name'])}：已{kind} {money(abs(got))}{moved}", close=deposit_popover)
     with b2, st.popover("紀錄・修改", icon=":material/more_horiz:", width="stretch"):
         deposits = db.get_goal_deposits(item["id"])
         if deposits:

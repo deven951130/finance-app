@@ -412,6 +412,9 @@ def test_儲蓄目標_存入時順便從現金轉到旅費帳戶(seeded):
     balances = {a["id"]: a["balance"] for a in db.get_accounts()}
     assert balances[cash] == 46000 and balances[trip_account] == 4000
     assert db.get_goal_deposits(item)[0]["from_account_id"] == cash
+    # 存完自動關掉「存入／取出」小視窗（見 closable_popover），也沒有留下「待關閉」的記號
+    assert at.session_state[f"deposit_popover_{item}"] is False
+    assert "close_popover" not in at.session_state
 
 
 def test_總覽顯示儲蓄目標進度_存不夠時提醒(seeded):
