@@ -30,7 +30,7 @@
 python -m venv .venv && source .venv/bin/activate   # Windows：.venv\Scripts\activate
 pip install -r requirements.txt
 streamlit run app.py          # http://localhost:8501，第一次會自動建立 data/finance.db
-pytest                        # 目前 215 passed（含 tests/test_app.py 的畫面測試；測試不會連網路）
+pytest                        # 目前 217 passed（含 tests/test_app.py 的畫面測試；測試不會連網路）
 
 # 用虛構範例資料啟動（不會動到 finance.db）
 python seed_example.py

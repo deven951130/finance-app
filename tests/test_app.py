@@ -395,6 +395,30 @@ def test_儲蓄目標_建立目標再存進細項(seeded):
     assert db.get_settings()["cash_on_hand"] == 50000
 
 
+def test_總覽顯示儲蓄目標進度_存不夠時提醒(seeded):
+    # 範例旅行：機票 12000 存了 3000、住宿 8000 → 還差 17000
+    at = make_app().run()
+    assert not at.exception
+    text = " ".join(m.value for m in at.markdown)
+    assert "儲蓄目標" in text and "範例旅行" in text and "還差 17,000 元" in text
+    assert "儲蓄目標每月共要存" not in text  # 2099 年才截止，每月要存的很少，不提醒
+
+    # 一個月內就要存 50000，超過每月可存，要提醒
+    # 截止日就是今天 = 剩 1 個月（用今天，月底跑測試也不會變成「已過期」）
+    db.add_goal_item(db.add_goal("範例急用", date.today().isoformat()), "急用", 50000)
+    at = make_app().run()
+    assert not at.exception
+    assert any("儲蓄目標每月共要存" in m.value for m in at.markdown)
+
+
+def test_總覽_沒有儲蓄目標不顯示卡片(temp_db):
+    db.save_settings({"monthly_income": 40000})
+    at = make_app().run()
+    assert not at.exception
+    assert any("淨資產" in m.value for m in at.markdown)  # 確定畫的是總覽，不是歡迎畫面
+    assert not any('card-title">儲蓄目標' in m.value for m in at.markdown)
+
+
 def test_儲蓄目標_細項格式錯誤不建立(seeded):
     at = make_app("page_goals").run()
     next(t for t in at.text_input if t.label.startswith("目標名稱（")).set_value("範例出國")

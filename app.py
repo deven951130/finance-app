@@ -772,6 +772,7 @@ def page_overview() -> None:
         else:
             st.info("還沒有持股")
 
+    goals_overview(today, savings if income > 0 else None)
     networth_trend()
 
     # --- 本月預算使用 ---
@@ -784,6 +785,48 @@ def page_overview() -> None:
         for i, c in enumerate(CATEGORIES):
             with cols[i % 2]:
                 budget_bar(c, spent[c], budgets.get(c, 0.0))
+
+
+def goals_overview(today: date, savings: float | None) -> None:
+    """總覽的「儲蓄目標」卡片：還沒達成的目標各一條進度條，再跟每月可存比一比。
+
+    savings 是每月可存；還沒填收入時是 None，就不比（收入 0 元時每個目標都會「存不夠」，沒有意義）。
+    沒有任何目標時整張卡片不顯示，總覽不多一塊空的。
+    """
+    goals = db.get_goals()
+    if not goals:
+        return
+    active = [g for g in goals if not goal_done(g["items"])]
+    finished = len(goals) - len(active)
+    total_need = 0.0
+    rows = []
+    for g in active:
+        totals = goal_totals(g["items"])
+        deadline = date.fromisoformat(g["deadline"]) if g["deadline"] else None
+        need = monthly_needed(totals["remaining"], months_until(today, deadline))
+        total_need += need or 0.0
+        rows.append((g, totals, need, deadline))
+
+    with st.container(key="card_goals_overview"):
+        note = f"每月共要存 {money(total_need)}" if total_need else ""
+        if finished:
+            note += ("・" if note else "") + f"已達成 {finished} 個"
+        card_title("儲蓄目標", note)
+        if not active:
+            st.caption("所有目標都達成了！")
+        for g, totals, need, deadline in rows:
+            label = html.escape(g["name"])
+            if deadline:
+                # .sub 的間距只在明細列裡有效，這裡在進度條標題裡，所以直接寫樣式
+                label += (f'<span style="color:{MUTED};font-weight:400;font-size:.82rem;margin-left:.5rem">'
+                          f'{deadline.year}/{deadline.month}/{deadline.day} 截止</span>')
+            progress_bar(label, totals["target"] - totals["remaining"], totals["target"], INK,
+                         goal_note(totals, False, need), totals["ratio"])
+        # 目標每月要存的，比每月可存還多：照現在的收支存不到，提早知道才能調整預算或延後截止日
+        if savings is not None and total_need > max(savings, 0):
+            notices([("目標", f"儲蓄目標每月共要存 {money(total_need)}，比每月可存 {money(savings)} "
+                              f"多 {money(total_need - max(savings, 0))}。可以減少生活預算，或把截止日往後延。", WARN)])
+        st.page_link(PAGES["goals"], label="前往儲蓄目標", icon=":material/arrow_forward:")
 
 
 def networth_trend() -> None:
@@ -1404,6 +1447,15 @@ def page_goals() -> None:
             goal_card(g)
 
 
+def goal_note(totals: dict, finished: bool, need: float | None) -> str:
+    """目標進度條下面的小字（儲蓄目標頁和總覽共用，兩邊說法才一致）。"""
+    if finished:
+        return f'<span style="color:{GOLD_TEXT};font-weight:600">全部細項都存到了</span>'
+    if need is not None:
+        return f"還差 {money(totals['remaining'])}・每月存 {money(need)} 就來得及"
+    return f"還差 {money(totals['remaining'])}"
+
+
 def goal_card(g: dict) -> None:
     """一個目標：可以點開的區塊（st.expander）。標題列就看得到整體進度，點開看細項。"""
     items = g["items"]
@@ -1428,14 +1480,8 @@ def goal_card(g: dict) -> None:
         if g["note"]:
             st.caption(plain(g["note"]))
 
-        if finished:
-            overall_note = f'<span style="color:{GOLD_TEXT};font-weight:600">全部細項都存到了</span>'
-        elif need is not None:
-            overall_note = f"還差 {money(totals['remaining'])}・每月存 {money(need)} 就來得及"
-        else:
-            overall_note = f"還差 {money(totals['remaining'])}"
         progress_bar("整體進度", totals["target"] - totals["remaining"], totals["target"],
-                     GOLD if finished else INK, overall_note, totals["ratio"])
+                     GOLD if finished else INK, goal_note(totals, finished, need), totals["ratio"])
 
         st.markdown('<div class="card-title" style="margin-top:.8rem">細項</div>', unsafe_allow_html=True)
         if not items:
