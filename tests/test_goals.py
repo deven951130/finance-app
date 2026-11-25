@@ -101,6 +101,54 @@ def test_存進目標不動帳戶(temp_db):
     assert db.get_settings()["cash_on_hand"] == 10000
 
 
+def _balances() -> dict:
+    return {a["name"]: a["balance"] for a in db.get_accounts()}
+
+
+def test_存入時順便轉到旅費帳戶_取出時轉回(temp_db):
+    cash = db.get_accounts()[0]["id"]  # 預設的「現金」帳戶
+    db.set_account_balance(cash, 10000)
+    trip_account = db.add_account("範例旅費", 0)
+    item = db.add_goal_item(db.add_goal("範例旅行", account_id=trip_account), "機票", 12000)
+
+    db.deposit_goal_item(item, 4000, from_account_id=cash)
+    assert _balances() == {"現金": 6000, "範例旅費": 4000}
+    db.deposit_goal_item(item, -1500, from_account_id=cash)  # 取出：轉回現金
+    assert _balances() == {"現金": 7500, "範例旅費": 2500}
+    db.deposit_goal_item(item, 500)  # 沒選來源帳戶：只記在目標名下，不轉帳
+    assert _balances() == {"現金": 7500, "範例旅費": 2500}
+
+    assert db.get_goals()[0]["items"][0]["saved"] == 3000
+    assert [d["from_account_id"] for d in db.get_goal_deposits(item)] == [None, cash, cash]
+
+
+def test_順便轉帳_餘額不夠或沒指定帳戶_什麼都不改(temp_db):
+    cash = db.get_accounts()[0]["id"]
+    db.set_account_balance(cash, 1000)
+    trip_account = db.add_account("範例旅費", 0)
+    item = db.add_goal_item(db.add_goal("範例旅行", account_id=trip_account), "機票", 12000)
+    with pytest.raises(ValueError, match="不夠"):
+        db.deposit_goal_item(item, 5000, from_account_id=cash)
+    with pytest.raises(ValueError, match="同一個帳戶"):
+        db.deposit_goal_item(item, 100, from_account_id=trip_account)
+    no_account = db.add_goal_item(db.add_goal("範例新手機"), "手機", 8000)
+    with pytest.raises(ValueError, match="指定"):
+        db.deposit_goal_item(no_account, 100, from_account_id=cash)
+    assert _balances() == {"現金": 1000, "範例旅費": 0}
+    assert db.get_goal_deposits(item) == [] and db.get_goal_deposits(no_account) == []
+
+
+def test_刪除旅費帳戶_目標變成沒指定帳戶(temp_db):
+    cash = db.get_accounts()[0]["id"]
+    trip_account = db.add_account("範例旅費", 0)
+    db.set_account_balance(cash, 1000)
+    item = db.add_goal_item(db.add_goal("範例旅行", account_id=trip_account), "機票", 12000)
+    db.deposit_goal_item(item, 300, from_account_id=cash)
+    db.delete_account(trip_account)
+    assert db.get_goals()[0]["account_id"] is None
+    assert db.get_goal_deposits(item)[0]["from_account_id"] == cash  # 現金還在，紀錄保留
+
+
 def test_修改與刪除_連同細項和紀錄(temp_db):
     goal = db.add_goal("範例旅行")
     item = db.add_goal_item(goal, "機票", 12000)

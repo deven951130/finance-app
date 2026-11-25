@@ -102,14 +102,16 @@ def main() -> None:
     db.add_receivable("範例同事 代墊聚餐", 850, day(3), "")
     db.collect_receivable(friend, 2000, bank, day(4))  # 朋友先還 2000，進範例銀行
 
-    # 儲蓄目標：一個存到一半的旅行（截止日約半年後），一個已經達成的
-    trip = db.add_goal("範例旅行", (today + timedelta(days=180)).isoformat(), "四月出發")
+    # 儲蓄目標：一個存到一半的旅行（截止日約半年後，旅費放在「範例旅費」帳戶），一個已經達成的
+    trip_account = db.add_account("範例旅費", 0)
+    trip = db.add_goal("範例旅行", (today + timedelta(days=180)).isoformat(), "四月出發", trip_account)
     ticket = db.add_goal_item(trip, "來回機票", 12000)
     hotel = db.add_goal_item(trip, "住宿", 15000)
     db.add_goal_item(trip, "交通", 4000)
     db.add_goal_item(trip, "吃飯購物", 20000)
-    db.deposit_goal_item(ticket, 12000, day(10))
-    db.deposit_goal_item(hotel, 5000, day(5))
+    # 存入時順便從範例銀行轉到範例旅費（示範紀錄裡的「從 範例銀行 轉入」）
+    db.deposit_goal_item(ticket, 12000, day(10), from_account_id=bank)
+    db.deposit_goal_item(hotel, 5000, day(5), from_account_id=bank)
     db.deposit_goal_item(db.add_goal_item(db.add_goal("範例新手機"), "手機", 8000), 8000, day(8))
 
     # 信用卡：上個月的已經繳清，這個月的還沒繳（會從範例銀行扣）

@@ -395,6 +395,25 @@ def test_儲蓄目標_建立目標再存進細項(seeded):
     assert db.get_settings()["cash_on_hand"] == 50000
 
 
+def test_儲蓄目標_存入時順便從現金轉到旅費帳戶(seeded):
+    cash = db.get_accounts()[0]["id"]  # seeded 的現金帳戶有 50000
+    trip_account = db.add_account("範例旅費", 0)
+    item = db.add_goal_item(db.add_goal("範例出國", account_id=trip_account), "機票", 10000)
+
+    at = make_app("page_goals").run()
+    assert not at.exception
+    assert any("放在 範例旅費" in m.value for m in at.markdown)
+    form = f"deposit_{item}"
+    next(s for s in at.selectbox if s.label.startswith("順便轉帳") and s.form_id == form).set_value(cash)
+    next(n for n in at.number_input if n.label == "金額" and n.form_id == form).set_value(4000)
+    next(b for b in at.button if b.label == "記下來" and b.form_id == form).click()
+    at.run()
+    assert not at.exception
+    balances = {a["id"]: a["balance"] for a in db.get_accounts()}
+    assert balances[cash] == 46000 and balances[trip_account] == 4000
+    assert db.get_goal_deposits(item)[0]["from_account_id"] == cash
+
+
 def test_總覽顯示儲蓄目標進度_存不夠時提醒(seeded):
     # 範例旅行：機票 12000 存了 3000、住宿 8000 → 還差 17000
     at = make_app().run()

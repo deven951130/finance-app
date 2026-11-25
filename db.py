@@ -252,6 +252,10 @@ def init_db() -> None:
         add_column(conn, "debts", "kind", "TEXT NOT NULL DEFAULT 'installment'")
         # 還款紀錄：從哪個帳戶還的
         add_column(conn, "debt_payments", "account_id", "INTEGER")
+        # 儲蓄目標：account_id 是旅費放在哪個帳戶（NULL = 沒指定）；
+        # 存入紀錄的 from_account_id 是存入時從哪個帳戶轉過來（取出時是轉回哪個帳戶），NULL = 沒有轉帳
+        add_column(conn, "goals", "account_id", "INTEGER")
+        add_column(conn, "goal_deposits", "from_account_id", "INTEGER")
         # 交易紀錄：用「買進／賣出」表單記的交易，會多記這些明細（手動記的舊紀錄都是 NULL）
         #   side 是 buy / sell；amount 成交金額；fee 手續費；tax 交易稅；broker 券商；account_id 扣款／入帳的帳戶
         for column, decl in [("side", "TEXT"), ("shares", "REAL"), ("price", "REAL"), ("amount", "REAL"),
@@ -385,6 +389,8 @@ def delete_account(account_id: int) -> None:
         conn.execute("UPDATE trades SET account_id = NULL WHERE account_id = ?", (account_id,))
         conn.execute("UPDATE receivable_payments SET account_id = NULL WHERE account_id = ?", (account_id,))
         conn.execute("UPDATE card_bills SET account_id = NULL WHERE account_id = ?", (account_id,))
+        conn.execute("UPDATE goals SET account_id = NULL WHERE account_id = ?", (account_id,))
+        conn.execute("UPDATE goal_deposits SET from_account_id = NULL WHERE from_account_id = ?", (account_id,))
         conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
 
 
@@ -712,7 +718,8 @@ def collect_receivable(receivable_id: int, amount: float, account_id: int,
 
 # ---------- 儲蓄目標 ----------
 #
-# 存進目標的錢不動帳戶：錢還在銀行帳戶裡，只是「記在這個目標名下」（見 models/goals.py）。
+# 預設存進目標不動帳戶：錢還在銀行帳戶裡，只是「記在這個目標名下」（見 models/goals.py）。
+# 目標可以指定「旅費放在哪個帳戶」；存入時選了來源帳戶，才會真的從來源帳戶轉到這個帳戶。
 
 def get_goals() -> list[dict]:
     """所有目標，每個目標多一個 'items'：細項清單，每個細項有 'saved'（存入紀錄加總）。
@@ -720,7 +727,8 @@ def get_goals() -> list[dict]:
     照建立順序排；畫面再把達成的移到後面（達成要用 models 判斷，不在 SQL 裡算）。
     """
     with get_connection() as conn:
-        goals = [dict(r) for r in conn.execute("SELECT id, name, deadline, note FROM goals ORDER BY id")]
+        goals = [dict(r) for r in conn.execute(
+            "SELECT id, name, deadline, note, account_id FROM goals ORDER BY id")]
         # LEFT JOIN：還沒存過錢的細項也要出現（saved 是 0）
         items = [dict(r) for r in conn.execute(
             "SELECT i.id, i.goal_id, i.name, i.target, COALESCE(SUM(d.amount), 0) AS saved"
@@ -732,21 +740,26 @@ def get_goals() -> list[dict]:
     return goals
 
 
-def add_goal(name: str, deadline: str | None = None, note: str = "") -> int:
-    """新增一個目標，回傳 id。deadline 是 'YYYY-MM-DD' 或 None（沒有截止日）。"""
+def add_goal(name: str, deadline: str | None = None, note: str = "", account_id: int | None = None) -> int:
+    """新增一個目標，回傳 id。deadline 是 'YYYY-MM-DD' 或 None（沒有截止日）；
+    account_id 是旅費放在哪個帳戶，None = 不指定（存入時就不能順便轉帳）。"""
     with get_connection() as conn:
-        return conn.execute("INSERT INTO goals (name, deadline, note) VALUES (?, ?, ?)",
-                            (name, deadline, note)).lastrowid
+        return conn.execute("INSERT INTO goals (name, deadline, note, account_id) VALUES (?, ?, ?, ?)",
+                            (name, deadline, note, account_id)).lastrowid
 
 
-def update_goal(goal_id: int, name: str, deadline: str | None, note: str) -> None:
+def update_goal(goal_id: int, name: str, deadline: str | None, note: str, account_id: int | None = None) -> None:
+    """修改目標。換了帳戶不會搬動已經存的錢（以前轉進去的錢還在原本的帳戶），要搬自己到帳戶頁轉帳。"""
     with get_connection() as conn:
-        conn.execute("UPDATE goals SET name = ?, deadline = ?, note = ? WHERE id = ?",
-                     (name, deadline, note, goal_id))
+        conn.execute("UPDATE goals SET name = ?, deadline = ?, note = ?, account_id = ? WHERE id = ?",
+                     (name, deadline, note, account_id, goal_id))
 
 
 def delete_goal(goal_id: int) -> None:
-    """刪除目標，連同細項和存入紀錄（三張表在同一個交易裡一起刪）。帳戶本來就沒動，不用改回去。"""
+    """刪除目標，連同細項和存入紀錄（三張表在同一個交易裡一起刪）。
+
+    帳戶餘額不改回去：轉進旅費帳戶的錢真的在那個帳戶裡，刪掉目標不代表錢回到原本的帳戶。
+    """
     with get_connection() as conn:
         conn.execute("DELETE FROM goal_deposits WHERE item_id IN (SELECT id FROM goal_items WHERE goal_id = ?)",
                      (goal_id,))
@@ -773,19 +786,26 @@ def delete_goal_item(item_id: int) -> None:
 
 
 def get_goal_deposits(item_id: int) -> list[dict]:
-    """某個細項的存入／取出紀錄，新的在前面。"""
+    """某個細項的存入／取出紀錄，新的在前面。from_account_id 是有轉帳時的另一個帳戶。"""
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT id, date, amount, note FROM goal_deposits WHERE item_id = ? ORDER BY date DESC, id DESC",
+            "SELECT id, date, amount, note, from_account_id FROM goal_deposits WHERE item_id = ?"
+            " ORDER BY date DESC, id DESC",
             (item_id,),
         ).fetchall()
     return [dict(row) for row in rows]
 
 
-def deposit_goal_item(item_id: int, amount: float, date_str: str | None = None, note: str = "") -> float:
+def deposit_goal_item(item_id: int, amount: float, date_str: str | None = None, note: str = "",
+                      from_account_id: int | None = None) -> float:
     """存入（amount > 0）或取出（amount < 0）一筆，回傳實際記下的金額。
 
     取出不能比目前存的多（只取出剩下的）；取不出東西或金額是 0 時丟 ValueError，什麼都不記。
+
+    from_account_id 有給時順便轉帳（目標要先指定帳戶）：
+    - 存入：從 from_account_id 轉到目標的帳戶
+    - 取出：從目標的帳戶轉回 from_account_id
+    轉出的帳戶餘額不夠就丟 ValueError。轉帳和存入紀錄在同一個交易裡，不會只做一半。
     """
     if amount == 0:
         raise ValueError("金額不能是 0")
@@ -797,8 +817,23 @@ def deposit_goal_item(item_id: int, amount: float, date_str: str | None = None, 
             amount = -withdraw_amount(saved, -amount)
             if amount == 0:
                 raise ValueError("這個細項還沒存錢，不能取出")
-        conn.execute("INSERT INTO goal_deposits (item_id, date, amount, note) VALUES (?, ?, ?, ?)",
-                     (item_id, date_str, amount, note))
+        if from_account_id is not None:
+            goal_account = conn.execute(
+                "SELECT g.account_id FROM goal_items i JOIN goals g ON g.id = i.goal_id WHERE i.id = ?",
+                (item_id,)).fetchone()["account_id"]
+            if goal_account is None:
+                raise ValueError("這個目標還沒指定旅費放在哪個帳戶，不能順便轉帳")
+            if goal_account == from_account_id:
+                raise ValueError("轉出和轉入是同一個帳戶")
+            # 存入：來源 → 目標帳戶；取出：目標帳戶 → 來源。先決定誰扣錢，再檢查餘額
+            src, dst = (from_account_id, goal_account) if amount > 0 else (goal_account, from_account_id)
+            account = conn.execute("SELECT name, balance FROM accounts WHERE id = ?", (src,)).fetchone()
+            if abs(amount) > account["balance"]:
+                raise ValueError(f"「{account['name']}」餘額 {account['balance']:,.0f} 不夠轉出 {abs(amount):,.0f}")
+            conn.execute("UPDATE accounts SET balance = balance - ? WHERE id = ?", (abs(amount), src))
+            conn.execute("UPDATE accounts SET balance = balance + ? WHERE id = ?", (abs(amount), dst))
+        conn.execute("INSERT INTO goal_deposits (item_id, date, amount, note, from_account_id) VALUES (?, ?, ?, ?, ?)",
+                     (item_id, date_str, amount, note, from_account_id))
     return amount
 
 

@@ -238,6 +238,57 @@ section[data-testid="stSidebar"] div[data-testid="stPopover"] button * {{ color:
 /* 表單送出按鈕撐滿一點，比較好按 */
 div[data-testid="stFormSubmitButton"] button {{ min-width: 120px; }}
 
+/* ---------- 動畫 ----------
+   只有幾個動作，每個都對應一個意思，不做「每張卡片依序飛入」這種裝飾：
+   1. 印章：打開程式時蓋一次，像存摺封面上的印
+   2. 進度條：從 0 長到目前的比例，看得出「走到哪裡」
+   3. 結餘、結論：頁面打開時由下浮現
+   4. 明細列、按鈕：滑過、按下只給顏色和微小位移的回饋
+   Streamlit 每次互動都會整頁重跑，但元素位置沒變時 DOM 不會重建，
+   所以入場動畫只在第一次出現時播放，不會每按一下就重播一次。 */
+@keyframes seal-stamp {{
+    0% {{ opacity: 0; transform: scale(1.6) rotate(-10deg); }}
+    60% {{ opacity: 1; transform: scale(.93) rotate(-3deg); }}
+    100% {{ opacity: 1; transform: scale(1) rotate(-3deg); }}
+}}
+@keyframes grow {{ from {{ width: 0; }} }}
+@keyframes rise {{ from {{ opacity: 0; transform: translateY(8px); }} }}
+
+section[data-testid="stSidebar"] .seal {{
+    display: inline-grid; place-items: center; vertical-align: middle;
+    width: 1.8rem; height: 1.8rem; margin-right: .6rem;
+    border: 2px solid #E3B866; border-radius: 4px; color: #E3B866;
+    font-family: {SERIF}; font-size: 1.05rem; font-weight: 900; line-height: 1;
+    animation: seal-stamp .6s cubic-bezier(.3, .7, .3, 1) both;
+}}
+
+.budget-fill {{ transition: width .6s cubic-bezier(.2, .7, .2, 1);
+                animation: grow .9s cubic-bezier(.2, .7, .2, 1) both; }}
+.hero-num, .verdict-word {{ animation: rise .6s ease-out both; }}
+.hero-num {{ animation-delay: .1s; }}
+
+/* 明細列：滑過時整列淡淡變色，並用負邊界把文字位置留在原來的對齊線上 */
+.ledger {{ margin: 0 -.5rem; }}
+.ledger-row {{ padding: 7px .5rem; border-radius: 4px;
+               transition: background-color .2s ease; }}
+.ledger-row:not(.total):hover {{ background: #E6ECE8; }}
+
+/* 按鈕：按下去微縮，像實體按鍵；顏色變化也要慢一點，不要突然跳色 */
+button[kind] {{ transition: transform .15s ease, background-color .2s ease,
+                border-color .2s ease, color .2s ease; }}
+button[kind]:active {{ transform: scale(.97); }}
+
+/* 側邊欄導覽：滑過時底色淡入，目前頁面的底色不動 */
+section[data-testid="stSidebar"] [data-testid="stPageLink-NavLink"] {{
+    transition: background-color .2s ease, padding-left .2s ease;
+}}
+section[data-testid="stSidebar"] [data-testid="stPageLink-NavLink"]:hover {{
+    background-color: rgba(255, 255, 255, .08);
+}}
+
+/* 頁首下面一條細線，像存摺每一頁的抬頭 */
+.page-head {{ border-bottom: 1px solid #CCD6CF; padding-bottom: .9rem; }}
+
 /* ---------- 手機（寬度 640px 以下） ----------
    Streamlit 在窄螢幕會把每個欄位都疊成一行，明細列表就會被拉得很長。
    列表卡片的 key 都以 _list 結尾，這裡讓它們的每一列保持橫排。 */
@@ -271,6 +322,14 @@ div[data-testid="stFormSubmitButton"] button {{ min-width: 120px; }}
     /* 刪除按鈕只留垃圾桶圖示，省空間 */
     [class*="st-key-card"][class*="_list"] button[kind="tertiary"] div[data-testid="stMarkdownContainer"] {{
         display: none;
+    }}
+}}
+
+/* 有些人會因為動態畫面不舒服（前庭敏感），系統設定「減少動態效果」時全部關掉 */
+@media (prefers-reduced-motion: reduce) {{
+    *, *::before, *::after {{
+        animation-duration: .01ms !important; animation-iteration-count: 1 !important;
+        transition-duration: .01ms !important;
     }}
 }}
 </style>
@@ -1397,7 +1456,8 @@ def receivable_card(r: dict, account_id: int, names: dict[int, str]) -> None:
 def page_goals() -> None:
     """儲蓄目標：像任務清單，每個目標點開後列出細項，各自存、各自看進度。
 
-    存進目標只是「把錢記到這個目標名下」，不動帳戶、不影響淨資產（錢還在銀行帳戶裡）。
+    存進目標預設只是「把錢記到這個目標名下」，不動帳戶、不影響淨資產（錢還在銀行帳戶裡）。
+    目標指定了「旅費放在哪個帳戶」時，存入可以順便從別的帳戶轉過去（只是帳戶之間搬錢，淨資產也不變）。
     """
     page_header("儲蓄目標", "像任務一樣：一個目標拆成幾個細項，存一筆記一筆，各自看進度")
 
@@ -1411,7 +1471,7 @@ def page_goals() -> None:
     m1.metric("已存進目標", money(earmarked))
     m2.metric("還差", money(sum(goal_totals(g["items"])["remaining"] for g in goals)))
     m3.metric("帳戶裡還沒分配", money(cash - earmarked),
-              help="帳戶合計減掉已存進目標的錢。存進目標不會動帳戶，這裡幫你看還有多少錢沒有指定用途")
+              help="帳戶合計減掉已存進目標的錢，看還有多少錢沒有指定用途。順便轉帳只是帳戶之間搬錢，合計不變")
     if earmarked > cash:
         notices([("注意", f"存進目標的錢（{money(earmarked)}）比帳戶合計（{money(cash)}）還多，"
                           "可能有錢已經花掉了，記得到目標裡「取出」。", WARN)])
@@ -1425,6 +1485,9 @@ def page_goals() -> None:
             deadline = st.date_input("截止日（例如出發日，可不填）", value=None, min_value=date.today())
             lines = st.text_area("細項：一行一個，名稱 空格 金額",
                                  placeholder="來回機票 12000\n住宿 15000\n交通 4000\n吃飯購物 20000")
+            # 預設不指定：只是記在目標名下。想把旅費分開放，先到帳戶頁開一個「旅費」帳戶再選它
+            account_id = account_select("旅費放在哪個帳戶（可不選）", key="goal_account", allow_none=True,
+                                        default=None, none_label="不指定，只記在目標名下")
             note = st.text_input("備註（可不填）")
             if st.form_submit_button("建立目標", type="primary", icon=":material/add:"):
                 items, bad = parse_item_lines(lines)
@@ -1434,7 +1497,7 @@ def page_goals() -> None:
                 elif bad:
                     st.warning("這幾行看不懂，請寫成「名稱 金額」：" + "、".join(plain(b) for b in bad))
                 else:
-                    goal_id = db.add_goal(name, deadline.isoformat() if deadline else None, note.strip())
+                    goal_id = db.add_goal(name, deadline.isoformat() if deadline else None, note.strip(), account_id)
                     for item_name, target in items:
                         db.add_goal_item(goal_id, item_name, target)
                     done(f"已建立目標：{plain(name)}（{len(items)} 個細項）")
@@ -1443,8 +1506,9 @@ def page_goals() -> None:
         if not goals:
             st.info("還沒有儲蓄目標。在右邊建立一個，例如「日本旅遊」，再列出機票、住宿這些細項。")
             return
+        names = account_names()
         for g in goals:
-            goal_card(g)
+            goal_card(g, names)
 
 
 def goal_note(totals: dict, finished: bool, need: float | None) -> str:
@@ -1456,7 +1520,7 @@ def goal_note(totals: dict, finished: bool, need: float | None) -> str:
     return f"還差 {money(totals['remaining'])}"
 
 
-def goal_card(g: dict) -> None:
+def goal_card(g: dict, names: dict[int, str]) -> None:
     """一個目標：可以點開的區塊（st.expander）。標題列就看得到整體進度，點開看細項。"""
     items = g["items"]
     totals = goal_totals(items)
@@ -1476,6 +1540,8 @@ def goal_card(g: dict) -> None:
             tags = chip(f"{deadline:%Y/%m/%d} 截止・剩 {months} 個月", INK)
         else:
             tags = chip("沒有截止日", MUTED)
+        if g["account_id"] in names:
+            tags += " " + chip(f"放在 {names[g['account_id']]}", INK)  # chip() 自己會 html.escape
         st.markdown(tags, unsafe_allow_html=True)
         if g["note"]:
             st.caption(plain(g["note"]))
@@ -1487,7 +1553,7 @@ def goal_card(g: dict) -> None:
         if not items:
             st.caption("還沒有細項，在下面加一個。")
         for item in items:
-            goal_item_row(item, months)
+            goal_item_row(item, months, g["account_id"] if g["account_id"] in names else None, names)
 
         # 加細項：一行排開，名稱、金額、按鈕
         with st.form(f"add_item_{g['id']}", clear_on_submit=True, border=False):
@@ -1506,24 +1572,29 @@ def goal_card(g: dict) -> None:
                 new_name = st.text_input("目標名稱", value=g["name"])
                 new_deadline = st.date_input("截止日（可不填）", value=deadline)
                 new_note = st.text_input("備註", value=g["note"] or "")
+                new_account = account_select("旅費放在哪個帳戶", key=f"goal_account_{g['id']}", allow_none=True,
+                                             default=g["account_id"], none_label="不指定，只記在目標名下")
+                st.caption("換帳戶不會搬動已經存的錢，要搬的話到帳戶頁轉帳。")
                 if st.form_submit_button("儲存", type="primary"):
                     if not new_name.strip():
                         st.warning("請輸入目標名稱")
                     else:
                         db.update_goal(g["id"], new_name.strip(),
-                                       new_deadline.isoformat() if new_deadline else None, new_note.strip())
+                                       new_deadline.isoformat() if new_deadline else None, new_note.strip(),
+                                       new_account)
                         done("已修改目標")
             st.divider()
-            st.caption("刪除會連同所有細項和存入紀錄一起刪掉。帳戶餘額不會變（存進目標本來就沒動帳戶）。")
+            st.caption("刪除會連同所有細項和存入紀錄一起刪掉。帳戶餘額不會變：轉進旅費帳戶的錢還在那個帳戶裡。")
             if st.button("刪除這個目標", key=f"del_goal_{g['id']}", icon=":material/delete:"):
                 db.delete_goal(g["id"])
                 done(f"已刪除目標：{plain(g['name'])}")
 
 
-def goal_item_row(item: dict, months: int | None) -> None:
+def goal_item_row(item: dict, months: int | None, goal_account: int | None, names: dict[int, str]) -> None:
     """一個細項：進度條，加上「存入／取出」和「紀錄・修改」兩個小視窗（st.popover）。
 
     一個細項只放兩個按鈕：放五個（存入、取出、修改、刪除、紀錄）在手機上會擠成一團。
+    goal_account 是目標的旅費帳戶（沒指定是 None），有的話存入表單多一個「順便轉帳」。
     """
     saved, target = item["saved"], item["target"]
     left = max(target - saved, 0.0)
@@ -1547,6 +1618,17 @@ def goal_item_row(item: dict, months: int | None) -> None:
             # 預設金額：存入是「還差多少」，一次存滿；部分存入再自己改
             amount = st.number_input("金額", min_value=0.0, value=float(left), step=100.0, format="%.0f")
             when = st.date_input("日期", value=date.today())
+            from_account = None
+            if goal_account is not None:
+                # 表單裡選了「存入／取出」不會馬上重跑，所以說明文字兩個方向都寫
+                others = [i for i in names if i != goal_account]
+                balances = {a["id"]: a["balance"] for a in db.get_accounts()}
+                from_account = st.selectbox(
+                    f"順便轉帳（存入：轉進「{names[goal_account]}」；取出：轉回這個帳戶）",
+                    [None] + others,
+                    format_func=lambda i: "不轉帳，錢已經在旅費帳戶" if i is None
+                    else f"{names[i]}（{money(balances[i])}）",
+                )
             dep_note = st.text_input("備註（可不填）")
             if st.form_submit_button("記下來", type="primary", icon=":material/check:"):
                 if amount <= 0:
@@ -1554,15 +1636,19 @@ def goal_item_row(item: dict, months: int | None) -> None:
                 else:
                     try:
                         got = db.deposit_goal_item(item["id"], amount if kind == "存入" else -amount,
-                                                   when.isoformat(), dep_note.strip())
-                    except ValueError as e:
+                                                   when.isoformat(), dep_note.strip(), from_account)
+                    except ValueError as e:  # 餘額不夠、沒存過不能取出
                         st.warning(str(e))
                     else:
-                        done(f"{plain(item['name'])}：已{kind} {money(abs(got))}")
+                        moved = ""
+                        if from_account is not None:
+                            src, dst = ((from_account, goal_account) if got > 0 else (goal_account, from_account))
+                            moved = f"（{plain(names[src])} → {plain(names[dst])}）"
+                        done(f"{plain(item['name'])}：已{kind} {money(abs(got))}{moved}")
     with b2, st.popover("紀錄・修改", icon=":material/more_horiz:", width="stretch"):
         deposits = db.get_goal_deposits(item["id"])
         if deposits:
-            rows = [("", f'{d["date"]}<span class="sub" style="color:{MUTED}">{html.escape(d["note"] or "")}</span>',
+            rows = [("", f'{d["date"]}<span class="sub" style="color:{MUTED}">{deposit_detail(d, names)}</span>',
                      signed_money(d["amount"])) for d in deposits[:30]]
             st.markdown(ledger_html(rows, total=False), unsafe_allow_html=True)
         else:
@@ -1579,6 +1665,17 @@ def goal_item_row(item: dict, months: int | None) -> None:
         if st.button("刪除這個細項", key=f"del_item_{item['id']}", icon=":material/delete:"):
             db.delete_goal_item(item["id"])
             done(f"已刪除細項：{plain(item['name'])}")
+
+
+def deposit_detail(d: dict, names: dict[int, str]) -> str:
+    """存入紀錄旁邊的灰字：有轉帳時寫「從 現金 轉入」「轉回 現金」，再接備註。回傳 HTML（已 escape）。"""
+    parts = []
+    if d["from_account_id"] in names:
+        account = html.escape(names[d["from_account_id"]])
+        parts.append(f"從 {account} 轉入" if d["amount"] > 0 else f"轉回 {account}")
+    if d["note"]:
+        parts.append(html.escape(d["note"]))
+    return "・".join(parts)
 
 
 # ---------- 頁面：信用卡 ----------
@@ -2446,7 +2543,8 @@ current = st.navigation(pages, position="hidden")
 
 with st.sidebar:
     # 名稱：OniPulsar 星脈流轉（2026-10-22 使用者取的新名字，原名「個人理財」）
-    st.markdown('<div class="brand">OniPulsar</div>'
+    # 左邊的小方框是「印」：存摺封面上蓋的章，打開時會蓋一次（見 inject_css 的動畫區）
+    st.markdown('<div class="brand"><span class="seal">星</span>OniPulsar</div>'
                 '<div class="brand-sub">星脈流轉・資料只存在你的電腦</div>',
                 unsafe_allow_html=True)
     for group, group_pages in pages.items():
