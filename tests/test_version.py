@@ -2,6 +2,8 @@
 測試版本比較與「要不要強制更新」的判斷（models/version.py），以及連不上時一律放行（update_check.py）。
 """
 
+import re
+
 import update_check
 from models.version import is_older, parse_version, update_status
 from version import APP_VERSION
@@ -51,4 +53,11 @@ def test_連不上伺服器時放行(monkeypatch):
 
 
 def test_版本號格式正確():
-    assert len(parse_version(APP_VERSION)) == 3 and APP_VERSION.count(".") == 2
+    # 兩種寫法都可以：1.2.3，或 0.1t1（2026-11-25 起使用者指定的寫法，跟夢境前線的 0.4t9 一樣）
+    assert re.fullmatch(r"\d+\.\d+(\.\d+|t\d+)", APP_VERSION)
+
+
+def test_t_版本號只比前面的數字():
+    assert parse_version("0.1t1") == [0, 1]
+    assert not is_older("0.1t1", "0.1t1")   # catalog 的 min_version 也是 0.1t1 時不會擋住自己
+    assert not is_older("1.1.5", "0.1t1")   # 已安裝 1.1.5 的人不會被強制擋住（Hub 仍會顯示有新版本）
