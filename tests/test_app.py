@@ -76,10 +76,14 @@ def seeded(temp_db):
     db.add_holding("台積電", "2330", "A 證券", 10, 900, 1000)
     db.add_trade(today, "2330", "買進", 0, "")
     db.record_networth("2026-01-01", 10000)
+    trip = db.add_goal("範例旅行", "2099-12-31", "")
+    db.deposit_goal_item(db.add_goal_item(trip, "機票", 12000), 3000)
+    db.add_goal_item(trip, "住宿", 8000)
     return temp_db
 
 
-PAGES = ["page_expenses", "page_accounts", "page_budgets", "page_fixed", "page_debts", "page_receivables",
+PAGES = ["page_expenses", "page_accounts", "page_budgets", "page_goals", "page_fixed", "page_debts",
+         "page_receivables",
          "page_cards", "page_stocks",
          "page_precheck", "page_trades", "page_dca", "page_settings"]
 
@@ -368,6 +372,38 @@ def test_別人欠我_記一筆再收回(seeded):
     assert not at.exception
     assert [x for x in db.get_receivables() if x["id"] == r["id"]][0]["remaining"] == 0
     assert db.get_settings()["cash_on_hand"] == 50500
+
+
+def test_儲蓄目標_建立目標再存進細項(seeded):
+    at = make_app("page_goals").run()
+    next(t for t in at.text_input if t.label.startswith("目標名稱（")).set_value("範例出國")
+    next(t for t in at.text_area if t.label.startswith("細項")).set_value("機票 10000\n住宿 6,000")
+    next(b for b in at.button if b.label == "建立目標").click()
+    at.run()
+    assert not at.exception
+    goal = [g for g in db.get_goals() if g["name"] == "範例出國"][0]
+    assert [(i["name"], i["target"]) for i in goal["items"]] == [("機票", 10000), ("住宿", 6000)]
+
+    # 存入：預設金額是「還差多少」，按下去就存滿這個細項；帳戶不會變
+    ticket = goal["items"][0]
+    at = make_app("page_goals").run()
+    next(b for b in at.button if b.label == "記下來" and b.form_id == f"deposit_{ticket['id']}").click()
+    at.run()
+    assert not at.exception
+    goal = [g for g in db.get_goals() if g["name"] == "範例出國"][0]
+    assert goal["items"][0]["saved"] == 10000
+    assert db.get_settings()["cash_on_hand"] == 50000
+
+
+def test_儲蓄目標_細項格式錯誤不建立(seeded):
+    at = make_app("page_goals").run()
+    next(t for t in at.text_input if t.label.startswith("目標名稱（")).set_value("範例出國")
+    next(t for t in at.text_area if t.label.startswith("細項")).set_value("伴手禮")
+    next(b for b in at.button if b.label == "建立目標").click()
+    at.run()
+    assert not at.exception
+    assert any("看不懂" in w.value for w in at.warning)
+    assert not [g for g in db.get_goals() if g["name"] == "範例出國"]
 
 
 def test_信用卡_繳清帳單從帳戶扣(seeded):

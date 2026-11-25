@@ -22,6 +22,7 @@ from models.budget import CATEGORIES
 from models.cards import bill_month, unpaid
 from models.debt import payment_this_period
 from models.fees import DEFAULT_MIN_FEE, avg_after_buy, realized_pnl, trade_summary
+from models.goals import withdraw_amount
 from models.receivables import collect_amount
 
 
@@ -209,6 +210,34 @@ def init_db() -> None:
             " paid_date TEXT,"
             " account_id INTEGER,"
             " UNIQUE (card_id, month))"
+        )
+
+        # 儲蓄目標（2026-11-25 使用者要求「像任務一樣，可以點開，列細項分別看進度」）。
+        # 三層：目標（日本旅遊）→ 細項（機票、住宿）→ 存入紀錄。
+        # deadline 是 'YYYY-MM-DD'，NULL = 沒有截止日
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS goals ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " name TEXT NOT NULL,"
+            " deadline TEXT,"
+            " note TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS goal_items ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " goal_id INTEGER NOT NULL,"
+            " name TEXT NOT NULL,"
+            " target REAL NOT NULL)"
+        )
+        # 存入紀錄：amount 正的是存入、負的是取出。細項存了多少 = 這張表加總，
+        # 不另外存一個「已存金額」欄位：同一個數字存兩個地方，遲早會對不起來
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS goal_deposits ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " item_id INTEGER NOT NULL,"
+            " date TEXT NOT NULL,"
+            " amount REAL NOT NULL,"
+            " note TEXT)"
         )
 
         # 舊資料庫升級：CREATE TABLE IF NOT EXISTS 不會幫已經存在的表加欄位，要自己用 ALTER TABLE 補
@@ -681,6 +710,98 @@ def collect_receivable(receivable_id: int, amount: float, account_id: int,
     return got
 
 
+# ---------- 儲蓄目標 ----------
+#
+# 存進目標的錢不動帳戶：錢還在銀行帳戶裡，只是「記在這個目標名下」（見 models/goals.py）。
+
+def get_goals() -> list[dict]:
+    """所有目標，每個目標多一個 'items'：細項清單，每個細項有 'saved'（存入紀錄加總）。
+
+    照建立順序排；畫面再把達成的移到後面（達成要用 models 判斷，不在 SQL 裡算）。
+    """
+    with get_connection() as conn:
+        goals = [dict(r) for r in conn.execute("SELECT id, name, deadline, note FROM goals ORDER BY id")]
+        # LEFT JOIN：還沒存過錢的細項也要出現（saved 是 0）
+        items = [dict(r) for r in conn.execute(
+            "SELECT i.id, i.goal_id, i.name, i.target, COALESCE(SUM(d.amount), 0) AS saved"
+            " FROM goal_items i LEFT JOIN goal_deposits d ON d.item_id = i.id"
+            " GROUP BY i.id ORDER BY i.id"
+        )]
+    for g in goals:
+        g["items"] = [i for i in items if i["goal_id"] == g["id"]]
+    return goals
+
+
+def add_goal(name: str, deadline: str | None = None, note: str = "") -> int:
+    """新增一個目標，回傳 id。deadline 是 'YYYY-MM-DD' 或 None（沒有截止日）。"""
+    with get_connection() as conn:
+        return conn.execute("INSERT INTO goals (name, deadline, note) VALUES (?, ?, ?)",
+                            (name, deadline, note)).lastrowid
+
+
+def update_goal(goal_id: int, name: str, deadline: str | None, note: str) -> None:
+    with get_connection() as conn:
+        conn.execute("UPDATE goals SET name = ?, deadline = ?, note = ? WHERE id = ?",
+                     (name, deadline, note, goal_id))
+
+
+def delete_goal(goal_id: int) -> None:
+    """刪除目標，連同細項和存入紀錄（三張表在同一個交易裡一起刪）。帳戶本來就沒動，不用改回去。"""
+    with get_connection() as conn:
+        conn.execute("DELETE FROM goal_deposits WHERE item_id IN (SELECT id FROM goal_items WHERE goal_id = ?)",
+                     (goal_id,))
+        conn.execute("DELETE FROM goal_items WHERE goal_id = ?", (goal_id,))
+        conn.execute("DELETE FROM goals WHERE id = ?", (goal_id,))
+
+
+def add_goal_item(goal_id: int, name: str, target: float) -> int:
+    """在目標底下加一個細項，回傳 id。"""
+    with get_connection() as conn:
+        return conn.execute("INSERT INTO goal_items (goal_id, name, target) VALUES (?, ?, ?)",
+                            (goal_id, name, target)).lastrowid
+
+
+def update_goal_item(item_id: int, name: str, target: float) -> None:
+    with get_connection() as conn:
+        conn.execute("UPDATE goal_items SET name = ?, target = ? WHERE id = ?", (name, target, item_id))
+
+
+def delete_goal_item(item_id: int) -> None:
+    with get_connection() as conn:
+        conn.execute("DELETE FROM goal_deposits WHERE item_id = ?", (item_id,))
+        conn.execute("DELETE FROM goal_items WHERE id = ?", (item_id,))
+
+
+def get_goal_deposits(item_id: int) -> list[dict]:
+    """某個細項的存入／取出紀錄，新的在前面。"""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, date, amount, note FROM goal_deposits WHERE item_id = ? ORDER BY date DESC, id DESC",
+            (item_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def deposit_goal_item(item_id: int, amount: float, date_str: str | None = None, note: str = "") -> float:
+    """存入（amount > 0）或取出（amount < 0）一筆，回傳實際記下的金額。
+
+    取出不能比目前存的多（只取出剩下的）；取不出東西或金額是 0 時丟 ValueError，什麼都不記。
+    """
+    if amount == 0:
+        raise ValueError("金額不能是 0")
+    date_str = date_str or date.today().isoformat()
+    with get_connection() as conn:
+        if amount < 0:
+            saved = conn.execute("SELECT COALESCE(SUM(amount), 0) AS s FROM goal_deposits WHERE item_id = ?",
+                                 (item_id,)).fetchone()["s"]
+            amount = -withdraw_amount(saved, -amount)
+            if amount == 0:
+                raise ValueError("這個細項還沒存錢，不能取出")
+        conn.execute("INSERT INTO goal_deposits (item_id, date, amount, note) VALUES (?, ?, ?, ?)",
+                     (item_id, date_str, amount, note))
+    return amount
+
+
 # ---------- 信用卡 ----------
 
 def get_cards() -> list[dict]:
@@ -989,7 +1110,8 @@ def get_networth_history() -> list[dict]:
 # 要備份的資料表
 EXPORT_TABLES = ["settings", "accounts", "budgets", "expenses", "fixed_expenses",
                  "debts", "debt_payments", "receivables", "receivable_payments", "credit_cards", "card_bills",
-                 "holdings", "brokers", "trades", "networth_history"]
+                 "holdings", "brokers", "trades", "networth_history",
+                 "goals", "goal_items", "goal_deposits"]
 
 
 def export_csv_zip() -> bytes:
@@ -1111,7 +1233,8 @@ def is_empty() -> bool:
     下次打開又看到歡迎畫面，會以為資料不見了。
     """
     with get_connection() as conn:
-        for table in ["expenses", "fixed_expenses", "debts", "receivables", "credit_cards", "holdings", "trades"]:
+        for table in ["expenses", "fixed_expenses", "debts", "receivables", "credit_cards", "holdings", "trades",
+                      "goals"]:
             if conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
                 return False
         # 開了第二個帳戶，或帳戶裡有錢，也算開始使用了

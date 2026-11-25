@@ -44,6 +44,8 @@ from models.debt import add_months, months_left, paid_in_month, payment_this_per
 from models.dca import monthly_withdrawal, project
 from models.precheck import CHECK_ITEMS, check_order
 from models.fees import realized_pnl
+from models.goals import (goal_done, goal_totals, item_done, monthly_needed, months_until, parse_item_lines,
+                          progress_ratio)
 from models.quotes import is_trading_time, normalize_symbol
 from models.receivables import collected_ratio, outstanding_total
 from version import APP_VERSION
@@ -1347,6 +1349,192 @@ def receivable_card(r: dict, account_id: int, names: dict[int, str]) -> None:
             st.markdown(ledger_html(rows, total=False), unsafe_allow_html=True)
 
 
+# ---------- 頁面：儲蓄目標 ----------
+
+def page_goals() -> None:
+    """儲蓄目標：像任務清單，每個目標點開後列出細項，各自存、各自看進度。
+
+    存進目標只是「把錢記到這個目標名下」，不動帳戶、不影響淨資產（錢還在銀行帳戶裡）。
+    """
+    page_header("儲蓄目標", "像任務一樣：一個目標拆成幾個細項，存一筆記一筆，各自看進度")
+
+    goals = db.get_goals()
+    # 達成的移到後面，進行中的在前面（sorted 是穩定排序：同一組裡維持建立順序）
+    goals = sorted(goals, key=lambda g: goal_done(g["items"]))
+    earmarked = sum(goal_totals(g["items"])["saved"] for g in goals)
+    cash = db.get_settings()["cash_on_hand"]
+
+    m1, m2, m3 = summary_strip("goals", 3)
+    m1.metric("已存進目標", money(earmarked))
+    m2.metric("還差", money(sum(goal_totals(g["items"])["remaining"] for g in goals)))
+    m3.metric("帳戶裡還沒分配", money(cash - earmarked),
+              help="帳戶合計減掉已存進目標的錢。存進目標不會動帳戶，這裡幫你看還有多少錢沒有指定用途")
+    if earmarked > cash:
+        notices([("注意", f"存進目標的錢（{money(earmarked)}）比帳戶合計（{money(cash)}）還多，"
+                          "可能有錢已經花掉了，記得到目標裡「取出」。", WARN)])
+
+    list_col, form_col = st.columns([3, 2])
+
+    with form_col, st.container(key="card_add_goal"):
+        card_title("新增目標")
+        with st.form("add_goal", clear_on_submit=True, border=False):
+            name = st.text_input("目標名稱（例如 日本旅遊）")
+            deadline = st.date_input("截止日（例如出發日，可不填）", value=None, min_value=date.today())
+            lines = st.text_area("細項：一行一個，名稱 空格 金額",
+                                 placeholder="來回機票 12000\n住宿 15000\n交通 4000\n吃飯購物 20000")
+            note = st.text_input("備註（可不填）")
+            if st.form_submit_button("建立目標", type="primary", icon=":material/add:"):
+                items, bad = parse_item_lines(lines)
+                name = name.strip()
+                if not name:
+                    st.warning("請輸入目標名稱")
+                elif bad:
+                    st.warning("這幾行看不懂，請寫成「名稱 金額」：" + "、".join(plain(b) for b in bad))
+                else:
+                    goal_id = db.add_goal(name, deadline.isoformat() if deadline else None, note.strip())
+                    for item_name, target in items:
+                        db.add_goal_item(goal_id, item_name, target)
+                    done(f"已建立目標：{plain(name)}（{len(items)} 個細項）")
+
+    with list_col:
+        if not goals:
+            st.info("還沒有儲蓄目標。在右邊建立一個，例如「日本旅遊」，再列出機票、住宿這些細項。")
+            return
+        for g in goals:
+            goal_card(g)
+
+
+def goal_card(g: dict) -> None:
+    """一個目標：可以點開的區塊（st.expander）。標題列就看得到整體進度，點開看細項。"""
+    items = g["items"]
+    totals = goal_totals(items)
+    finished = goal_done(items)
+    deadline = date.fromisoformat(g["deadline"]) if g["deadline"] else None
+    label = f"{plain(g['name'])}　{money(totals['saved'])} / {money(totals['target'])}・{totals['ratio']:.0%}"
+    # key 固定用目標的 id：標題裡的金額每存一筆就會變，沒有 key 的話 Streamlit 會當成新的區塊而自動收起來
+    with st.expander(label, key=f"goal_{g['id']}", icon=":material/task_alt:" if finished else ":material/flag:"):
+        # 截止日、每月要存多少
+        months = months_until(date.today(), deadline)
+        need = monthly_needed(totals["remaining"], months)
+        if finished:
+            tags = chip("已達成", GOLD_TEXT)
+        elif deadline and months == 0:
+            tags = chip(f"{deadline:%Y/%m/%d} 已過", WARN)
+        elif deadline:
+            tags = chip(f"{deadline:%Y/%m/%d} 截止・剩 {months} 個月", INK)
+        else:
+            tags = chip("沒有截止日", MUTED)
+        st.markdown(tags, unsafe_allow_html=True)
+        if g["note"]:
+            st.caption(plain(g["note"]))
+
+        if finished:
+            overall_note = f'<span style="color:{GOLD_TEXT};font-weight:600">全部細項都存到了</span>'
+        elif need is not None:
+            overall_note = f"還差 {money(totals['remaining'])}・每月存 {money(need)} 就來得及"
+        else:
+            overall_note = f"還差 {money(totals['remaining'])}"
+        progress_bar("整體進度", totals["target"] - totals["remaining"], totals["target"],
+                     GOLD if finished else INK, overall_note, totals["ratio"])
+
+        st.markdown('<div class="card-title" style="margin-top:.8rem">細項</div>', unsafe_allow_html=True)
+        if not items:
+            st.caption("還沒有細項，在下面加一個。")
+        for item in items:
+            goal_item_row(item, months)
+
+        # 加細項：一行排開，名稱、金額、按鈕
+        with st.form(f"add_item_{g['id']}", clear_on_submit=True, border=False):
+            c1, c2, c3 = st.columns([3, 2, 1.4], vertical_alignment="bottom")
+            item_name = c1.text_input("新增細項", placeholder="例如 網卡、保險")
+            target = c2.number_input("目標金額", min_value=0.0, step=1000.0, format="%.0f")
+            if c3.form_submit_button("加上", icon=":material/add:"):
+                if not item_name.strip():
+                    st.warning("請輸入細項名稱")
+                else:
+                    db.add_goal_item(g["id"], item_name.strip(), target)
+                    done(f"已加上細項：{plain(item_name.strip())}")
+
+        with st.popover("修改這個目標", icon=":material/edit:"):
+            with st.form(f"edit_goal_{g['id']}", border=False):
+                new_name = st.text_input("目標名稱", value=g["name"])
+                new_deadline = st.date_input("截止日（可不填）", value=deadline)
+                new_note = st.text_input("備註", value=g["note"] or "")
+                if st.form_submit_button("儲存", type="primary"):
+                    if not new_name.strip():
+                        st.warning("請輸入目標名稱")
+                    else:
+                        db.update_goal(g["id"], new_name.strip(),
+                                       new_deadline.isoformat() if new_deadline else None, new_note.strip())
+                        done("已修改目標")
+            st.divider()
+            st.caption("刪除會連同所有細項和存入紀錄一起刪掉。帳戶餘額不會變（存進目標本來就沒動帳戶）。")
+            if st.button("刪除這個目標", key=f"del_goal_{g['id']}", icon=":material/delete:"):
+                db.delete_goal(g["id"])
+                done(f"已刪除目標：{plain(g['name'])}")
+
+
+def goal_item_row(item: dict, months: int | None) -> None:
+    """一個細項：進度條，加上「存入／取出」和「紀錄・修改」兩個小視窗（st.popover）。
+
+    一個細項只放兩個按鈕：放五個（存入、取出、修改、刪除、紀錄）在手機上會擠成一團。
+    """
+    saved, target = item["saved"], item["target"]
+    left = max(target - saved, 0.0)
+    if item_done(saved, target):
+        color = GOLD
+        note = f'<span style="color:{GOLD_TEXT};font-weight:600">已達成</span>'
+        if saved > target:
+            note += f"・多存了 {money(saved - target)}"
+    else:
+        color = INK
+        need = monthly_needed(left, months)
+        note = f"還差 {money(left)}・{progress_ratio(saved, target):.0%}"
+        if need is not None:
+            note += f"・每月 {money(need)}"
+    progress_bar(html.escape(item["name"]), saved, target, color, note, progress_ratio(saved, target))
+
+    b1, b2 = st.columns(2)
+    with b1, st.popover("存入／取出", icon=":material/savings:", width="stretch"):
+        with st.form(f"deposit_{item['id']}", border=False):
+            kind = st.radio("要做什麼", ["存入", "取出"], horizontal=True)
+            # 預設金額：存入是「還差多少」，一次存滿；部分存入再自己改
+            amount = st.number_input("金額", min_value=0.0, value=float(left), step=100.0, format="%.0f")
+            when = st.date_input("日期", value=date.today())
+            dep_note = st.text_input("備註（可不填）")
+            if st.form_submit_button("記下來", type="primary", icon=":material/check:"):
+                if amount <= 0:
+                    st.warning("金額要大於 0")
+                else:
+                    try:
+                        got = db.deposit_goal_item(item["id"], amount if kind == "存入" else -amount,
+                                                   when.isoformat(), dep_note.strip())
+                    except ValueError as e:
+                        st.warning(str(e))
+                    else:
+                        done(f"{plain(item['name'])}：已{kind} {money(abs(got))}")
+    with b2, st.popover("紀錄・修改", icon=":material/more_horiz:", width="stretch"):
+        deposits = db.get_goal_deposits(item["id"])
+        if deposits:
+            rows = [("", f'{d["date"]}<span class="sub" style="color:{MUTED}">{html.escape(d["note"] or "")}</span>',
+                     signed_money(d["amount"])) for d in deposits[:30]]
+            st.markdown(ledger_html(rows, total=False), unsafe_allow_html=True)
+        else:
+            st.caption("還沒有存入紀錄")
+        with st.form(f"edit_item_{item['id']}", border=False):
+            new_name = st.text_input("細項名稱", value=item["name"])
+            new_target = st.number_input("目標金額", min_value=0.0, value=float(target), step=1000.0, format="%.0f")
+            if st.form_submit_button("儲存"):
+                if not new_name.strip():
+                    st.warning("請輸入細項名稱")
+                else:
+                    db.update_goal_item(item["id"], new_name.strip(), new_target)
+                    done("已修改細項")
+        if st.button("刪除這個細項", key=f"del_item_{item['id']}", icon=":material/delete:"):
+            db.delete_goal_item(item["id"])
+            done(f"已刪除細項：{plain(item['name'])}")
+
+
 # ---------- 頁面：信用卡 ----------
 
 # 帳單狀態 → (文字, 顏色)。過期用橘色、快到期用金色（紅綠留給漲跌）
@@ -2142,6 +2330,7 @@ NAV = [
         (page_expenses, "記帳", ":material/edit_note:", "expenses"),
         (page_accounts, "帳戶", ":material/account_balance:", "accounts"),
         (page_budgets, "每月預算", ":material/pie_chart:", "budgets"),
+        (page_goals, "儲蓄目標", ":material/flag:", "goals"),
         (page_fixed, "固定支出", ":material/event_repeat:", "fixed"),
         (page_debts, "負債", ":material/request_quote:", "debts"),
         (page_receivables, "別人欠我", ":material/handshake:", "receivables"),
